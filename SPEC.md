@@ -169,10 +169,10 @@ substates := [?]sc.Substate_Def(Drone_State){
 }
 ```
 
-Initial substates are also a separate table:
+Regions are also a separate table. In the current OR-state model, each region has one containing superstate and one initial substate:
 
 ```odin
-initials := [?]sc.Initial_Def(Drone_State){
+regions := [?]sc.Region_Def(Drone_State){
 	{superstate = .Operational, initial = .Operational_Idle},
 	{superstate = .Armed, initial = .Armed_Ready},
 	{superstate = .Flying, initial = .Flying_Hover},
@@ -182,8 +182,17 @@ initials := [?]sc.Initial_Def(Drone_State){
 The records stay simple and inspectable:
 
 ```odin
+State_Kind :: enum {
+	Inferred,
+	Atomic,
+	Or,
+	And,
+	Final,
+}
+
 State_Def :: struct($State: typeid) {
 	id: State,
+	kind: State_Kind,
 	entry: Action,
 	exit: Action,
 }
@@ -193,13 +202,60 @@ Substate_Def :: struct($State: typeid) {
 	superstate: State,
 }
 
+Region_Def :: struct($State: typeid) {
+	name: string,
+	superstate: State,
+	initial: State,
+}
+
 Initial_Def :: struct($State: typeid) {
 	superstate: State,
 	initial: State,
 }
+
+History_Kind :: enum {
+	Shallow,
+	Deep,
+}
+
+History_Def :: struct($State: typeid) {
+	id: State,
+	superstate: State,
+	fallback: State,
+	kind: History_Kind,
+}
+
+Done_Def :: struct($State, $Trigger: typeid) {
+	state: State,
+	trigger: Trigger,
+}
+
+After_Def :: struct($State, $Trigger: typeid) {
+	state: State,
+	delay_ms: u64,
+	trigger: Trigger,
+}
 ```
 
 This avoids fake top states, sentinel enum values, `has_*` flags in public chart data, and constructor-only state definitions.
+
+`kind` is optional in ordinary Odin struct literals because the zero value is `.Inferred`. Inferred states are treated as `.Atomic` when they have no substates and `.Or` when they do. Explicit `.Atomic` states may not have substates.
+
+Explicit `.And` states enter all `Region_Def` entries owned by that state. In the current direct-child region model, each region initial must be a direct child branch of the `.And` state, and every direct child branch must have exactly one `Region_Def` or legacy `Initial_Def` owned by that `.And` state. `Region_Def.name` gives orthogonal regions a stable application-facing label; duplicate non-empty names under the same superstate are rejected.
+
+External transitions compute an exit set from the transition source and target. A branch-local transition exits only that branch. A transition that leaves a containing `.And` state exits all active descendant branches before exiting the containing state itself.
+
+When one event enables multiple non-conflicting branch-local transitions in active regions, dispatch applies those transitions in the same macrostep. If enabled transitions have overlapping exit sets, the transition whose source is deeper in the state hierarchy preempts the ancestor-sourced transition. This keeps child transition priority consistent across orthogonal regions.
+
+History is defined with `History_Def`. Its `id` is a transition target token from the user's state enum, but it is not a real active state and should not appear in `states`. When a transition targets that history id, the runtime enters the remembered configuration for `superstate`, or `fallback` if no history has been recorded.
+
+`Shallow` history remembers the last direct child exited under `superstate`. `Deep` history currently remembers one nested active leaf in an OR hierarchy. Deep history for `.And` states is rejected for now because a concurrent state needs to restore multiple active leaves.
+
+Run-to-completion dispatch is available through `dispatch_run_to_completion`. Transition actions can call `raise(ctx, Event(...))` to append internal events to the instance-owned queue. In this mode callbacks receive a `Runtime_Context`, not the raw user pointer directly; use `user_context(ctx)` to recover application context. The ordinary `dispatch` and `dispatch_with_trace` calls continue to pass the raw user `ctx` unchanged.
+
+`Final` states are atomic completion markers. `is_complete` reports whether a state's active regions have all reached final leaves. `Done_Def` maps a completed state to a typed event; during run-to-completion dispatch, entering a final state can raise that completion event automatically.
+
+Delayed events are defined with `After_Def`. Entering `state` arms the timer at `now_ms + delay_ms`, exiting that state cancels it, and `dispatch_due_events(instance, now_ms, ...)` processes due timers through the same internal event queue used by run-to-completion dispatch. The application owns the clock and supplies `now_ms`; the package does not sleep or read wall-clock time.
 
 ## Chart Definition
 
@@ -210,7 +266,7 @@ chart_def := sc.Chart_Def(Drone_State, Drone_Event){
 	initial = .Off,
 	states = states[:],
 	substates = substates[:],
-	initials = initials[:],
+	regions = regions[:],
 	transitions = transitions[:],
 }
 ```
@@ -222,8 +278,12 @@ Chart_Def :: struct($State, $Trigger: typeid) {
 	initial: State,
 	states: []State_Def(State),
 	substates: []Substate_Def(State),
+	regions: []Region_Def(State),
 	initials: []Initial_Def(State),
+	histories: []History_Def(State),
 	transitions: []Transition_Def(State, Trigger),
+	done_events: []Done_Def(State, Trigger),
+	after_events: []After_Def(State, Trigger),
 }
 ```
 
@@ -233,10 +293,28 @@ The runtime may compile this into a compact internal representation:
 Chart :: struct($State, $Trigger: typeid) {
 	def: Chart_Def(State, Trigger),
 
-	// Internal lookup tables and normalized integer ids.
+	// Internal lookup tables, including superstate indexes,
+	// initial-substate indexes, and source transition adjacency.
 	// Exact fields are implementation details.
 }
 ```
+
+The implementation uses distinct internal index types for readability and to avoid mixing state and transition indices:
+
+```odin
+State_Index :: distinct int
+Transition_Index :: distinct int
+Region_Index :: distinct int
+```
+
+Current `Region_Def` entries are compiled into internal regions:
+
+- One implicit top region contains all top-level states and uses `Chart_Def.initial`.
+- Each `Region_Def` creates one OR-region containing the direct substates of its superstate.
+- Named regions can be queried at runtime by superstate and region name.
+- Current default entry follows the compiled region metadata, not the public definition tables directly.
+
+`Initial_Def` remains as a compatibility type for older code. New code should prefer `Region_Def`.
 
 ## Transition Definition
 
@@ -299,19 +377,24 @@ can_arm :: proc(ctx_raw: rawptr, event_raw: rawptr) -> bool {
 Instance :: struct($State, $Trigger: typeid) {
 	chart: ^Chart(State, Trigger),
 
-	// Current active leaf states.
-	// MVP has length 1 after startup.
-	// Orthogonal states will allow length > 1.
-	active_leaves: [dynamic]State,
+	// Current active leaf state indices.
+	// OR-only charts produce length 1 after startup.
+	// AND states can produce length > 1.
+	active_leaf_indices: [dynamic]State_Index,
 }
 ```
 
 Proposed operations:
 
 ```odin
+Compile_Options :: struct {
+	allow_ambiguous_transitions: bool,
+}
+
 compile :: proc(
 	out: ^Chart($State, $Trigger),
 	def: Chart_Def(State, Trigger),
+	options := Compile_Options{},
 ) -> Compile_Result
 
 init :: proc(
@@ -324,13 +407,67 @@ enter_initial :: proc(
 	ctx: rawptr = nil,
 ) -> Dispatch_Result(State)
 
+enter_initial_at :: proc(
+	instance: ^Instance($State, $Trigger),
+	now_ms: u64,
+	ctx: rawptr = nil,
+) -> Dispatch_Result(State)
+
 dispatch :: proc(
 	instance: ^Instance($State, $Trigger),
 	event: Event(Trigger),
 	ctx: rawptr = nil,
 ) -> Dispatch_Result(State)
 
+dispatch_at :: proc(
+	instance: ^Instance($State, $Trigger),
+	event: Event(Trigger),
+	now_ms: u64,
+	ctx: rawptr = nil,
+) -> Dispatch_Result(State)
+
+dispatch_with_trace :: proc(
+	instance: ^Instance($State, $Trigger),
+	event: Event(Trigger),
+	transitions: ^[dynamic]Transition_Step(State),
+	ctx: rawptr = nil,
+) -> Dispatch_Result(State)
+
+dispatch_run_to_completion :: proc(
+	instance: ^Instance($State, $Trigger),
+	event: Event(Trigger),
+	ctx: rawptr = nil,
+	options := Run_To_Completion_Options{},
+) -> Dispatch_Result(State)
+
+dispatch_run_to_completion_at :: proc(
+	instance: ^Instance($State, $Trigger),
+	event: Event(Trigger),
+	now_ms: u64,
+	ctx: rawptr = nil,
+	options := Run_To_Completion_Options{},
+) -> Dispatch_Result(State)
+
+dispatch_due_events :: proc(
+	instance: ^Instance($State, $Trigger),
+	now_ms: u64,
+	ctx: rawptr = nil,
+	options := Run_To_Completion_Options{},
+) -> Dispatch_Result(State)
+
+raise :: proc(
+	ctx: rawptr,
+	event: Event($Trigger),
+) -> bool
+
+user_context :: proc(ctx: rawptr) -> rawptr
+
 is_active :: proc(
+	instance: ^Instance($State, $Trigger),
+	state: State,
+) -> bool
+
+is_complete :: proc(
 	instance: ^Instance($State, $Trigger),
 	state: State,
 ) -> bool
@@ -339,6 +476,12 @@ configuration :: proc(
 	instance: ^Instance($State, $Trigger),
 	out: ^[dynamic]State,
 )
+
+active_leaf_in_region :: proc(
+	instance: ^Instance($State, $Trigger),
+	superstate: State,
+	region_name: string,
+) -> (State, bool)
 ```
 
 Example usage:
@@ -382,13 +525,20 @@ Dispatch_Result :: struct($State: typeid) {
 	source: State,
 	target: State,
 
-	exited: [dynamic]State,
-	entered: [dynamic]State,
-	configuration: [dynamic]State,
+	exited: []State,
+	entered: []State,
+	configuration: []State,
+}
+
+Transition_Step :: struct($State: typeid) {
+	source: State,
+	target: State,
 }
 ```
 
-Open question: returning dynamic arrays in every dispatch may be too allocation-heavy. The implementation can instead store scratch buffers on the instance, accept output buffers from the caller, or provide a lightweight `Dispatch_Result` plus optional tracing hooks.
+The dispatch result slices are views into scratch storage owned by the `Instance`. They are valid until the next call that mutates the same instance, such as `dispatch` or `enter_initial`.
+
+`source` and `target` report the last applied transition, preserving the single-transition API. For orthogonal macrosteps that may apply more than one transition, call `dispatch_with_trace` with a caller-owned dynamic array. The function clears and fills that array with all applied transition steps. This keeps normal `dispatch` allocation-free and avoids always-on tracing overhead.
 
 ## Execution Semantics
 
@@ -429,20 +579,16 @@ Compilation should validate:
 - Every state that appears as a superstate has exactly one initial substate.
 - No state that lacks substates appears in the initial-substate table.
 - No state appears as a substate of more than one superstate.
-- Duplicate enabled transitions are either rejected or deterministically ordered.
+- Duplicate transitions with the same source and trigger are rejected by default.
 
-The first implementation should prefer rejecting ambiguous charts unless declaration-order priority is explicitly documented.
+If `Compile_Options.allow_ambiguous_transitions` is true, duplicate source/trigger transitions are accepted and declaration order is priority order.
 
 ## Future Features
 
 Planned but not MVP:
 
-- Orthogonal states / AND decomposition.
-- Shallow history.
-- Deep history.
-- Internal event queue and run-to-completion macrosteps.
-- Delayed or timed events.
-- Final states.
+- Deep history for `.And` states.
+- Broadcast semantics across all active regions beyond the current queued internal events.
 - DOT graph export.
 - SCXML import/export subset.
 - Typed callback helpers for application contexts and events.
@@ -455,7 +601,7 @@ Use typed chart definitions:
 sc.Transition_Def(Drone_State, Drone_Event)
 sc.State_Def(Drone_State)
 sc.Substate_Def(Drone_State)
-sc.Initial_Def(Drone_State)
+sc.Region_Def(Drone_State)
 sc.Chart_Def(Drone_State, Drone_Event)
 sc.Instance(Drone_State, Drone_Event)
 ```
@@ -473,7 +619,7 @@ substates := [?]sc.Substate_Def(Drone_State){
 	{substate = .Operational_Idle, superstate = .Operational},
 }
 
-initials := [?]sc.Initial_Def(Drone_State){
+regions := [?]sc.Region_Def(Drone_State){
 	{superstate = .Operational, initial = .Operational_Idle},
 }
 ```

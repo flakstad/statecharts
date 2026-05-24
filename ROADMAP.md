@@ -18,7 +18,7 @@ The long-term target is not just "an FSM helper." The goal is a deterministic st
 
 Implemented:
 
-- Typed `State_Def`, `Substate_Def`, `Initial_Def`, `Transition_Def`, and `Chart_Def`.
+- Typed `State_Def`, `Substate_Def`, `Region_Def`, `Transition_Def`, and `Chart_Def`.
 - No fake `Root` or `Top` enum state.
 - Hierarchical states using superstate/substate relationships.
 - Initial substates for compound states.
@@ -32,17 +32,50 @@ Implemented:
 - External self-transition exits and re-enters.
 - Validation for common malformed charts.
 - Dispatch tracing with exited, entered, and configuration state arrays.
+- Compile options.
+- Ambiguous source/trigger transitions rejected by default.
+- Opt-in declaration-order priority for ambiguous transitions.
+- Instance-owned dispatch trace buffers.
+- Allocation-free dispatch after instance initialization.
+- Compiled source adjacency tables for transition lookup.
+- Active leaves stored as dense state indices.
+- Transition source/target endpoints compiled to dense state indices.
+- Internal indices use distinct `State_Index` and `Transition_Index` types.
+- Current OR-style regions are compiled into internal regions.
+- Public `State_Kind` vocabulary exists: `Inferred`, `Atomic`, `Or`, and `And`.
+- Explicit atomic states with substates are rejected.
+- Dispatch selection scans all active leaves internally.
+- External transitions remove the matched active leaf instead of clearing the whole active set.
+- Explicit `And` states can enter multiple `Region_Def` entries owned by the same state.
+- Explicit `And` states validate that each direct child branch has exactly one region initial.
+- Region definitions can carry stable names for application-facing orthogonal regions.
+- Runtime code can query the active leaf in a named region without allocating.
+- Branch-local transitions in one active region preserve the other active regions.
+- Transitions that leave a containing `And` state exit all active descendant branches.
+- One event can apply multiple non-conflicting branch-local transitions across active regions in one dispatch.
+- `dispatch_with_trace` can fill a caller-owned transition-step buffer for macrostep debugging.
+- A game character controller showcase demonstrates locomotion, combat, and status as concurrent regions.
+- Shallow history targets can resume the last direct child of a compound state.
+- Deep history targets can resume one nested leaf in an OR hierarchy.
+- A media player showcase demonstrates pause/resume with shallow history.
+- `dispatch_run_to_completion` processes raised internal events until stable.
+- Transition actions can call `raise` during run-to-completion dispatch.
+- A workflow showcase demonstrates one external event cascading to completion.
+- `Final` states mark compound-state completion.
+- `Done_Def` can raise typed completion events during run-to-completion dispatch.
+- A checkout showcase demonstrates final-state completion advancing a workflow.
+- `After_Def` arms delayed events when states are entered and cancels them on exit.
+- `dispatch_due_events` processes app-clock due timers without allocation.
+- A network retry showcase demonstrates timeout behavior.
 
 Known MVP limitations:
 
-- Dispatch trace arrays allocate per dispatch.
-- Only one active leaf is supported.
-- Orthogonal regions are not implemented.
-- History states are not implemented.
-- Run-to-completion macrosteps are not implemented.
-- Internal/broadcast event queues are not implemented.
-- Timed/delayed events are not implemented.
-- Ambiguous duplicate transitions are deterministic by declaration order, but not yet rejected by validation.
+- Full typed orthogonal region ids are not implemented.
+- Current `And` support is an intermediate direct-child branch model; arbitrary region membership is not implemented.
+- Deep history for `And` states is not implemented.
+- Broadcast semantics across all active regions beyond queued internal events are not implemented.
+- Wall-clock integration is application-owned; the package only consumes caller-provided `now_ms`.
+- Only source adjacency is compiled. Trigger-specific lookup may still be useful later for states with many outgoing transitions.
 
 ## Performance Target
 
@@ -126,12 +159,15 @@ Before adding "true Harel" features, finish the current core.
 
 Tasks:
 
-- Add compile options.
-- Reject ambiguous transitions by default.
-- Support opt-in declaration-order priority for ambiguous transitions.
-- Move dispatch trace buffers onto `Instance`.
-- Make dispatch allocation-free after `init`.
+- Add compile options. Done.
+- Reject ambiguous transitions by default. Done.
+- Support opt-in declaration-order priority for ambiguous transitions. Done.
+- Move dispatch trace buffers onto `Instance`. Done.
+- Make dispatch allocation-free after `init`. Done.
 - Add `reserve`/capacity planning during instance initialization.
+- Compile transition adjacency tables. Done.
+- Store active leaves and transition endpoints as dense indices. Done.
+- Use distinct types for dense runtime indices. Done.
 - Ensure repeated `compile`, `init`, and `enter_initial` are leak-free and deterministic.
 - Improve validation error messages or formatting helpers.
 - Keep tests focused on exact semantics.
@@ -158,12 +194,25 @@ Ambiguity rule:
 
 ## Phase 2: Region-Oriented Model
 
-The current `Initial_Def` model is enough for simple OR decomposition. True Harel statecharts need regions so a superstate can contain one or more concurrent regions.
+The current `Region_Def` model is enough for simple OR decomposition. True Harel statecharts need named regions so a superstate can contain one or more concurrent regions.
+
+Current status:
+
+- The public API now prefers `Region_Def`.
+- `Initial_Def` remains as a compatibility type for older examples/tests.
+- Compilation now builds internal region metadata from `Chart_Def.initial` and `Region_Def`.
+- There is one implicit top region.
+- Each superstate with an initial substate owns one internal OR-region.
+- `Region_Def.name` provides a stable string label for application-facing named regions.
+- Duplicate non-empty region names under the same superstate are rejected.
+- `active_leaf_in_region` returns the active leaf for a named region without allocation.
+
+This is still a stepping stone. Typed region ids, such as `Region_Def(State, Region)`, may still be worth adding later if string labels feel too weak for larger Odin programs.
 
 Replace or evolve:
 
 ```odin
-Initial_Def
+Region_Def
 ```
 
 into:
@@ -224,16 +273,17 @@ substates := [?]sc.Substate_Def(Drone_State, Drone_Region){
 }
 ```
 
-Open design question:
+Remaining design questions:
 
-- Should the top-level chart have an implicit top region?
-- Or should top-level states remain states with no region, using `chart.initial` for the first active top-level state?
+- Should region ids become typed enum values instead of strings?
+- Should substates eventually attach to a region id rather than repeating the superstate relation?
 
 Recommendation:
 
 - Keep the current no-fake-top public model.
 - Internally compile an implicit top region.
 - Let region definitions describe regions inside explicit states.
+- Keep string names for now because they preserve the simple `Region_Def(State)` API and avoid wrapper helpers.
 
 ## Phase 3: Orthogonal States
 
@@ -243,6 +293,7 @@ Add state kinds:
 
 ```odin
 State_Kind :: enum {
+	Inferred,
 	Atomic,
 	Or,
 	And,
@@ -258,9 +309,25 @@ State_Def :: struct($State: typeid) {
 
 Semantics:
 
+- `Inferred`: current compatibility default; leaf states behave as `Atomic`, compound states behave as `Or`.
 - `Atomic`: no regions.
 - `Or`: exactly one active child region path.
 - `And`: all child regions are active concurrently.
+
+Current implementation status:
+
+- `State_Kind` is exposed on `State_Def`.
+- Existing charts can omit `kind` because `.Inferred` is the zero value.
+- Explicit `.Atomic` states are validated.
+- Explicit `.And` states are executable for direct-child branch regions.
+- Multiple `Region_Def` entries with the same `.And` superstate are entered concurrently.
+- Named direct-child regions are implemented with `Region_Def.name`.
+- `active_leaf_in_region` provides a stable integration point for larger programs.
+- Transition exit sets now remove all active leaves under the highest state exited by the transition.
+- Dispatch now selects all non-conflicting branch-local transitions enabled by one event.
+- Overlapping transition conflicts use descendant-source priority: child transitions preempt ancestor transitions.
+- Multi-transition macrostep tracing is available through `dispatch_with_trace`; always-on result tracing measured too expensive.
+- Arbitrary region membership is still not implemented; a region currently starts at one direct child branch.
 
 Entering an `And` state enters the initial state of each region it owns.
 
@@ -283,11 +350,10 @@ Operational
 
 Events can trigger transitions in multiple orthogonal regions during one macrostep.
 
-Open semantic questions:
+Remaining semantic questions:
 
-- If an event enables transitions in multiple regions, should all non-conflicting transitions fire in the same step?
-- How should conflicts be resolved when a transition exits a superstate that contains other enabled transitions?
-- Should declaration order determine conflict priority, or should validation reject ambiguous cross-region conflicts?
+- How should conflicts be reported or traced when ancestor transitions are preempted?
+- Should same-depth overlapping conflicts be rejected by validation, reported at dispatch, or handled by declaration order?
 
 Recommendation:
 
@@ -305,7 +371,7 @@ Real-world examples:
 - A drone mission returns to the previous mission submode after a temporary avoidance maneuver.
 - An editor returns to the previous tool mode after a modal operation.
 
-Potential public API:
+Implemented API:
 
 ```odin
 History_Kind :: enum {
@@ -314,21 +380,27 @@ History_Kind :: enum {
 }
 
 History_Def :: struct($State: typeid) {
-	state: State,
+	id: State,
+	superstate: State,
+	fallback: State,
 	kind: History_Kind,
-	default: State,
 }
 ```
 
-Open design question:
+Current status:
 
-- Should transitions target history explicitly with a separate target type?
-- Or should history be modeled as pseudo-states in the user's state enum?
+- `History_Def.id` is a transition target token, not an active state.
+- History ids must not appear in `State_Def`.
+- Shallow history remembers the last direct child exited under `superstate`.
+- Deep history remembers one nested leaf under `superstate` for OR hierarchies.
+- Empty history enters `fallback`.
+- History storage is a dense `State_Index` table on `Instance`.
+- Deep history under `And` states is rejected because it needs to restore multiple active leaves.
 
-Recommendation:
+Remaining design questions:
 
-- Avoid forcing pseudo-states into the user enum if possible.
-- Consider a separate `Transition_Target` representation before implementing history.
+- Should history target ids remain values from the state enum, or should transitions grow a typed target union later?
+- Deep history for `And` states needs to restore multiple leaves.
 
 ## Phase 5: Run-To-Completion And Event Raising
 
@@ -340,24 +412,34 @@ Real-world examples:
 - Completing boot raises `Diagnostics_Start`.
 - Entering `Battery_Critical` raises `Return_Home` and `Stop_Payload`.
 
-The challenge is callback shape. Current callbacks are:
+Implemented API:
 
 ```odin
-Action :: proc(ctx: rawptr, event: rawptr)
+dispatch_run_to_completion :: proc(
+	instance: ^Instance($State, $Trigger),
+	event: Event(Trigger),
+	ctx: rawptr = nil,
+	options := Run_To_Completion_Options{},
+) -> Dispatch_Result(State)
+
+raise :: proc(ctx: rawptr, event: Event($Trigger)) -> bool
+user_context :: proc(ctx: rawptr) -> rawptr
 ```
 
-Actions cannot directly raise typed internal events without access to a generic runtime object.
+Current status:
 
-Options:
+- The instance owns a preallocated internal event queue.
+- `raise` appends to that queue during run-to-completion dispatch.
+- Queue overflow returns `Error`; it does not allocate.
+- Normal `dispatch` passes raw user context unchanged.
+- `dispatch_run_to_completion` passes a `Runtime_Context`; actions can call `user_context(ctx)` to recover the application context.
+- Focused tests cover raised events and no-allocation run-to-completion dispatch.
 
-1. Keep event queues application-owned. Actions append to the app's queue through `ctx`.
-2. Add a generic runtime/action context.
-3. Add a type-erased runtime handle with typed helper procedures.
+Remaining design questions:
 
-Recommendation:
-
-- Keep application-owned queues for now.
-- Later add an optional statechart-owned internal event queue if the callback API can stay clean and efficient.
+- Should there be a trace variant that records all microsteps and raised events?
+- Should queue capacity be configurable during `init`?
+- How should broadcast-style raised events interact with conflicting transitions across orthogonal regions?
 
 ## Phase 6: Delayed Events
 
@@ -369,29 +451,74 @@ Examples:
 - `Signal_Lost` waits 2 seconds before return-home.
 - `Landing` times out if ground contact is not detected.
 
-Potential API:
+Implemented API:
 
 ```odin
 After_Def :: struct($State, $Trigger: typeid) {
 	state: State,
-	duration_ms: u64,
+	delay_ms: u64,
 	trigger: Trigger,
 }
+
+enter_initial_at :: proc(..., now_ms: u64, ...)
+dispatch_at :: proc(..., now_ms: u64, ...)
+dispatch_run_to_completion_at :: proc(..., now_ms: u64, ...)
+dispatch_due_events :: proc(..., now_ms: u64, ...)
 ```
 
-Recommendation:
+Current status:
 
-- Do not bake in a clock early.
-- Let the application provide time and enqueue timer events.
-- Add helpers later if the core semantics are stable.
+- The application owns the clock and passes `now_ms`.
+- Entering a state arms matching `After_Def` timers.
+- Exiting a state cancels matching active timers.
+- Due timers are processed through the internal event queue and run-to-completion path.
+- Timer dispatch is allocation-free after `init`.
 
-## Real-World Example Track
+Remaining design questions:
 
-Examples should justify features before implementation.
+- Should there be an API to inspect the next due time for efficient polling?
+- Should after-events be part of run-to-completion dispatch automatically, or only when the app calls `dispatch_due_events`?
+
+## Tests, Examples, And Showcases
+
+The project should use three different kinds of examples:
+
+- **Unit tests**: small, focused charts that prove one semantic rule at a time.
+- **Examples**: compact programs that show how to use the API correctly.
+- **Showcases**: larger realistic models that demonstrate why statecharts are valuable.
+
+Tests should stay narrow. They should not depend on a large drone chart just to prove one rule. For example, child-priority, self-transition, history restoration, or orthogonal conflict behavior should each have small dedicated charts.
+
+Showcases should be allowed to be larger. Their job is to demonstrate how the package fits into real software and how Harel features reduce complexity.
+
+Recommended directory shape:
+
+```text
+statecharts/
+  statecharts.odin
+  statecharts_test.odin
+
+  examples/
+    door/
+    media_player/
+    editor_modes/
+
+  showcases/
+    drone_operations/
+    media_player_history/
+    editor_workspace/
+    network_protocol/
+```
+
+Example programs should compile and preferably run as normal Odin programs. Showcase models should be testable too, but their tests should focus on high-value scenarios rather than exhaustive semantics.
+
+## Real-World Showcase Track
+
+Showcases should justify features before implementation. Drone operations is a strong anchor, but it should not be the only model. Different domains expose different statechart strengths.
 
 ### Drone Operations
 
-Use hierarchy, orthogonality, guards, and eventually delayed events:
+Use hierarchy, orthogonality, guards, broadcast-style event handling, and eventually delayed events:
 
 ```text
 Operational
@@ -432,7 +559,7 @@ Feature value:
 
 ### Media Player
 
-Use hierarchy and history:
+Use hierarchy, history, and timed events:
 
 ```text
 Player
@@ -448,6 +575,7 @@ Feature value:
 
 - Parent-level transitions avoid duplicated `Stop`, `Pause`, and `Error`.
 - History resumes the exact previous playing submode.
+- Delayed events model buffering timeout and idle shutdown.
 
 ### Editor Modes
 
@@ -477,6 +605,86 @@ Feature value:
 - Tool, document, and modal state evolve independently.
 - History restores previous tool after temporary modal operations.
 
+### Network Protocol Session
+
+Use hierarchy, guards, retry counters, and delayed events:
+
+```text
+Session
+  Disconnected
+  Connecting
+    Resolving
+    OpeningSocket
+    Handshaking
+  Connected
+    Idle
+    Sending
+    WaitingForAck
+  BackingOff
+  Failed
+```
+
+Feature value:
+
+- Parent-level transitions handle `Disconnect`, `Timeout`, and `FatalError`.
+- Delayed events model retries and exponential backoff.
+- Guards decide whether retry budget remains.
+
+### Game Character Controller
+
+Use hierarchy and orthogonal regions:
+
+```text
+Character
+  Locomotion
+    Grounded
+      Idle
+      Run
+      JumpStart
+    Airborne
+      Rising
+      Falling
+
+  Combat
+    Unarmed
+    Attacking
+    Blocking
+
+  Status
+    Normal
+    Stunned
+    Invulnerable
+```
+
+Feature value:
+
+- Movement, combat, and status evolve independently.
+- Orthogonal regions avoid a combinatorial list of `RunningAndBlockingAndStunned` states.
+- Timed events model attack recovery, stun duration, and invulnerability windows.
+
+### Checkout Or Workflow Engine
+
+Use hierarchy, guards, and history:
+
+```text
+Checkout
+  Cart
+  CustomerInfo
+  Payment
+    EnteringPayment
+    Authorizing
+    Failed
+  Review
+  Complete
+  Cancelled
+```
+
+Feature value:
+
+- Guards enforce domain requirements before advancing.
+- History can return a user to the previous payment substep after fixing an error.
+- Parent-level transitions handle cancellation and session expiry.
+
 ## Near-Term Implementation Order
 
 1. Add `Compile_Options`.
@@ -484,10 +692,10 @@ Feature value:
 3. Move dispatch trace storage onto `Instance`.
 4. Compile transition adjacency tables.
 5. Make dispatch allocation-free.
-6. Replace/evolve `Initial_Def` into `Region_Def`.
-7. Re-implement current OR semantics on top of regions.
+6. Replace/evolve `Initial_Def` into `Region_Def`. Done for direct-child regions with optional names.
+7. Re-implement current OR semantics on top of regions. Done for current single-region compound states.
 8. Add orthogonal `And` states.
-9. Add real-world orthogonal drone example.
+9. Add real-world orthogonal showcases.
 10. Revisit history states.
 
 ## Definition Of Done For Each Feature
@@ -502,4 +710,3 @@ Each feature should include:
 - Tests for conflict or ambiguity behavior.
 - At least one real-world example showing why the feature exists.
 - No dispatch-time heap allocation unless explicitly documented.
-

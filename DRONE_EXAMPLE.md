@@ -269,7 +269,7 @@ substates := [?]sc.Substate_Def(Drone_State){
 	{substate = .Flying_Landing, superstate = .Flying},
 }
 
-initials := [?]sc.Initial_Def(Drone_State){
+regions := [?]sc.Region_Def(Drone_State){
 	{superstate = .Operational, initial = .Operational_Idle},
 	{superstate = .Armed, initial = .Armed_Ready},
 	{superstate = .Flying, initial = .Flying_Hover},
@@ -308,7 +308,7 @@ chart_def := sc.Chart_Def(Drone_State, Drone_Event){
 	initial = .Off,
 	states = states[:],
 	substates = substates[:],
-	initials = initials[:],
+	regions = regions[:],
 	transitions = transitions[:],
 }
 ```
