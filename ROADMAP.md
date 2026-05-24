@@ -569,8 +569,12 @@ Recommended directory shape:
 
 ```text
 statecharts/
-  statecharts.odin
-  statecharts_test.odin
+  statecharts/
+    types.odin
+    compile.odin
+    runtime.odin
+    export.odin
+    statecharts_test.odin
 
   examples/
     door/
