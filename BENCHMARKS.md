@@ -16,20 +16,33 @@ Run:
 odin run benchmarks/dispatch_bench.odin -file -collection:local=/Users/andreas/Projects -o:speed
 ```
 
+When running from a checkout that is not located at `/Users/andreas/Projects/statecharts`,
+point `local:statecharts` at that checkout through a temporary collection
+directory:
+
+```sh
+mkdir -p /tmp/statecharts-odin-local
+ln -sfn "$PWD" /tmp/statecharts-odin-local/statecharts
+odin run benchmarks/dispatch_bench.odin -file -collection:local=/tmp/statecharts-odin-local -o:speed
+```
+
 The benchmark uses a two-state ping-pong chart and dispatches the same event repeatedly.
 
 It measures:
 
-- Total elapsed time.
-- Nanoseconds per dispatch.
-- Allocator calls.
-- Resize calls.
-- Free calls.
-- Bytes requested.
+- Best and average nanoseconds per dispatch across repeated samples.
+- Maximum allocator calls across samples.
+- Maximum resize calls across samples.
+- Maximum free calls across samples.
+- Maximum bytes requested across samples.
+- A loose regression guard that fails the process if core dispatch modes exceed timing thresholds or allocate.
 
-The benchmark includes two modes:
+The benchmark includes these modes:
 
 - `scratch-buffer dispatch`: current implementation, where trace buffers are owned by `Instance` and reused.
+- `caller-owned transition trace dispatch`: dispatch plus caller-owned transition-step trace output.
+- `run-to-completion dispatch with one raised event`: one external event that raises and processes one internal event.
+- `due timer dispatch`: app-clock timer processing with one due `After_Def` event per dispatch.
 - `allocating trace/path dispatch`: simulated previous owned-result/path allocation model, where per-dispatch trace/path arrays are allocated and freed.
 - `wide transition lookup dispatch`: 32-state ring chart with one transition per state, used to measure transition lookup costs.
 
@@ -535,7 +548,7 @@ Interpretation:
 
 ## Deep History Measurement
 
-Deep history for OR hierarchies adds a second dense history table on the instance. On leaf exit, the runtime records that leaf for ancestor deep-history targets. Deep history under `And` states is still rejected because restoring concurrent history requires multiple remembered leaves.
+Deep history for OR hierarchies adds a second dense history table on the instance. On leaf exit, the runtime records that leaf for ancestor deep-history targets. Deep history under `And` states also records one remembered leaf per compiled region so concurrent history can restore multiple active leaves.
 
 Measured after adding deep history and keeping the no-history transition fast path:
 
@@ -564,7 +577,7 @@ Interpretation:
 
 ## Run-To-Completion Measurement
 
-Run-to-completion dispatch adds an instance-owned internal event queue. Transition actions can call `raise` to append internal events, and `dispatch_run_to_completion` processes those events until the chart reaches a stable configuration. The queue is reserved during `init`; overflow returns `Error` instead of allocating.
+Run-to-completion dispatch adds an instance-owned internal event queue. Transition actions can call `raise` to append internal events, and `dispatch_run_to_completion` processes those events until the chart reaches a stable configuration. The queue is reserved during `init`; overflow returns `Error` instead of allocating. Applications can pass `Init_Options.internal_event_capacity` to reserve a larger queue up front.
 
 Measured after adding run-to-completion dispatch and a benchmark case with one raised internal event:
 
@@ -676,6 +689,71 @@ Interpretation:
 
 - Delayed event dispatch is allocation-free after `init`, proven by tests.
 - The no-timer hot path is now too sensitive to code layout. Before adding more features, build a tighter benchmark harness and isolate optional feature paths more aggressively.
+
+## Repeated-Sample Benchmark Harness
+
+The benchmark now runs five samples per mode and reports both best and average
+nanoseconds per dispatch. This makes layout noise easier to see without treating
+one sample as the whole story. It also includes a due-timer benchmark so delayed
+event changes measure both the no-timer hot path and the timer path.
+
+Measured on May 24, 2026:
+
+```text
+scratch-buffer dispatch
+  iterations/sample: 2000000
+  samples:           5
+  best ns/dispatch:  35.58
+  avg ns/dispatch:   35.66
+  alloc calls max:   0
+  resize calls max:  0
+  free calls max:    0
+  bytes req max:     0
+
+caller-owned transition trace dispatch
+  best ns/dispatch:  36.74
+  avg ns/dispatch:   36.85
+  alloc calls max:   0
+
+run-to-completion dispatch with one raised event
+  best ns/dispatch:  87.69
+  avg ns/dispatch:   88.19
+  alloc calls max:   0
+
+due timer dispatch
+  best ns/dispatch:  58.31
+  avg ns/dispatch:   58.66
+  alloc calls max:   0
+
+allocating trace/path dispatch
+  best ns/dispatch:  155.41
+  avg ns/dispatch:   155.61
+  alloc calls max:   8000000
+  bytes req max:     512000000
+
+wide transition lookup dispatch
+  best ns/dispatch:  33.51
+  avg ns/dispatch:   33.69
+  alloc calls max:   0
+
+benchmark guard: PASS
+```
+
+Interpretation:
+
+- The previously recorded delayed-event no-timer regression did not reproduce in this repeated-sample run.
+- Normal dispatch and wide lookup are back in the low-30ns range with no allocation.
+- Due timer dispatch is allocation-free and measures the real `dispatch_due_events` path with one due event per iteration.
+- The transition hot path now reads transition definitions by pointer after source-adjacency lookup, avoiding an unnecessary struct copy before guard evaluation.
+- Conflict endpoint diagnostics are stored on the instance for `last_conflict`, keeping `Dispatch_Result` small on the hot path.
+- Preemption diagnostics are also instance-owned so descendant-priority reporting does not grow normal dispatch results.
+- Durable history snapshot/restore is outside the dispatch hot path; the post-change guard still passes with zero allocation in all guarded dispatch modes.
+- High fan-out states now have compiled source+trigger groups, while states with one or two outgoing transitions stay on the direct source-range scan.
+- `Init_Options` reserve knobs let applications pre-size larger instance buffers for long RTC cascades and wide configurations without changing normal dispatch allocation behavior.
+- Complete preemption diagnostics are stored in an instance-owned buffer and remain outside `Dispatch_Result`; guarded dispatch modes remain allocation-free.
+- Startup run-to-completion and due-timer trace variants reuse the existing instance-owned queue and caller-owned trace buffers; focused panic-allocator tests cover their no-allocation behavior.
+- SCXML export is an offline builder API and is not on the dispatch hot path; guarded dispatch benchmarks remain allocation-free after adding it.
+- The benchmark process now exits non-zero if guarded dispatch modes allocate or exceed loose timing limits.
 
 ## Regression Test
 

@@ -94,10 +94,15 @@ main :: proc() {
 	sc.destroy_dispatch_result(&result)
 	print_configuration(&machine, "initial")
 
-	result = sc.dispatch_run_to_completion(&machine, sc.Event(Workflow_Event){id = .Submit}, &ctx)
+	trace := make([dynamic]sc.Transition_Step(Workflow_State), 0, 3)
+	defer delete(trace)
+	result = sc.dispatch_run_to_completion_with_trace(&machine, sc.Event(Workflow_Event){id = .Submit}, &trace, &ctx)
 	defer sc.destroy_dispatch_result(&result)
 
 	fmt.printf("submit status: %v\n", result.status)
+	for step in trace {
+		fmt.printf("  %v -> %v\n", step.source, step.target)
+	}
 	print_configuration(&machine, "after submit")
 	fmt.print("log:")
 	for entry in ctx.log {

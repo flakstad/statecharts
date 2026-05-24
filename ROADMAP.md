@@ -24,12 +24,16 @@ Implemented:
 - Initial substates for compound states.
 - External transitions.
 - Internal transitions.
+- Local transitions.
+- Validation rejects internal transitions whose target differs from their source.
 - Entry and exit actions.
 - Guards.
+- Typed context, event, and event-payload helpers for callbacks.
 - Transition actions.
 - Leaf-to-superstate transition search.
 - Child transition priority over superstate transition.
 - External self-transition exits and re-enters.
+- External parent-to-descendant transitions exit and re-enter the source compound; local transitions preserve it.
 - Validation for common malformed charts.
 - Dispatch tracing with exited, entered, and configuration state arrays.
 - Compile options.
@@ -38,6 +42,7 @@ Implemented:
 - Instance-owned dispatch trace buffers.
 - Allocation-free dispatch after instance initialization.
 - Compiled source adjacency tables for transition lookup.
+- Compiled source+trigger adjacency groups for high fan-out states.
 - Active leaves stored as dense state indices.
 - Transition source/target endpoints compiled to dense state indices.
 - Internal indices use distinct `State_Index` and `Transition_Index` types.
@@ -54,28 +59,63 @@ Implemented:
 - Transitions that leave a containing `And` state exit all active descendant branches.
 - One event can apply multiple non-conflicting branch-local transitions across active regions in one dispatch.
 - `dispatch_with_trace` can fill a caller-owned transition-step buffer for macrostep debugging.
+- Same-depth overlapping cross-region transitions report `Conflict` and leave configuration unchanged.
+- `last_conflict` exposes the two overlapping transition endpoint pairs after a conflict.
+- `last_conflict_indices` exposes the corresponding `Chart_Def.transitions` declaration indices.
+- `last_preemption` and `last_preemption_indices` expose descendant-priority preemptions.
+- `last_preemptions` and `last_preemption_indices_all` expose every preemption recorded during a dispatch/RTC macrostep.
 - A game character controller showcase demonstrates locomotion, combat, and status as concurrent regions.
 - Shallow history targets can resume the last direct child of a compound state.
 - Deep history targets can resume one nested leaf in an OR hierarchy.
+- Deep history targets on `And` states can restore one remembered leaf per owned region.
 - A media player showcase demonstrates pause/resume with shallow history.
+- An editor workspace showcase demonstrates deep history across concurrent regions.
 - `dispatch_run_to_completion` processes raised internal events until stable.
 - Transition actions can call `raise` during run-to-completion dispatch.
+- Raised internal events use the same active-region broadcast selection as external events.
+- `dispatch_run_to_completion_with_trace` records all transition microsteps in a caller-owned buffer.
+- `Init_Options.internal_event_capacity` lets applications reserve larger RTC queues without dispatch allocation.
+- `Init_Options` exposes reserve knobs for active leaves, dispatch trace buffers, configuration snapshots, paths, and transition scratch buffers.
 - A workflow showcase demonstrates one external event cascading to completion.
+- `active_leaves` exposes the compact persistence snapshot for active runtime leaves.
+- `restore_active_leaves` supports database-backed command handlers that hydrate current state before dispatch.
+- An order persistence showcase demonstrates load-dispatch-persist command handling.
 - `Final` states mark compound-state completion.
 - `Done_Def` can raise typed completion events during run-to-completion dispatch.
+- `enter_initial_run_to_completion` processes startup entry raises and completion events until stable.
+- Validation rejects final states with substates or outgoing transitions.
+- Validation rejects done events on states that cannot complete.
+- Validation rejects duplicate done events for the same state/trigger.
 - A checkout showcase demonstrates final-state completion advancing a workflow.
 - `After_Def` arms delayed events when states are entered and cancels them on exit.
+- Validation rejects duplicate after events for the same state/delay/trigger.
 - `dispatch_due_events` processes app-clock due timers without allocation.
+- `dispatch_due_events_with_trace` records due-timer transition cascades in a caller-owned buffer.
+- `next_due_event_ms` exposes the earliest active timer for application schedulers.
+- `active_timers` snapshots active delayed events for durable schedulers.
+- `restore_active_timers` restores persisted delayed events after active leaves have been hydrated.
+- `active_history` snapshots shallow/deep remembered history for durable workflows.
+- `restore_history` restores remembered history after active leaves have been hydrated.
 - A network retry showcase demonstrates timeout behavior.
+- `active_leaves` writes the compact leaf-only persistence snapshot into a caller-owned buffer.
+- `restore_active_leaves` hydrates an instance from persisted active leaves without dispatch allocation.
+- An order persistence showcase demonstrates the database-as-source-of-truth integration pattern.
+- `write_dot` exports compiled charts to Graphviz DOT for inspection and review tooling.
+- A DOT export showcase demonstrates writing Graphviz output through a caller-owned builder.
+- `write_scxml` exports a compact SCXML subset for interchange and review tooling.
+- An SCXML export showcase demonstrates emitting XML from a compiled chart.
+- `write_validation_error` formats structured compile errors into contextual messages.
+- A validation errors showcase demonstrates user-facing compile diagnostics.
 
 Known MVP limitations:
 
 - Full typed orthogonal region ids are not implemented.
-- Current `And` support is an intermediate direct-child branch model; arbitrary region membership is not implemented.
-- Deep history for `And` states is not implemented.
-- Broadcast semantics across all active regions beyond queued internal events are not implemented.
+- Current `And` support has named direct-child region membership and cached `Region_Handle` lookups; typed region ids are not implemented.
 - Wall-clock integration is application-owned; the package only consumes caller-provided `now_ms`.
-- Only source adjacency is compiled. Trigger-specific lookup may still be useful later for states with many outgoing transitions.
+- Transition lookup keeps a direct scan for tiny source ranges and uses compiled source+trigger groups for high fan-out states.
+- The dispatch benchmark now reports repeated-sample best/average results and includes a due-timer path, but more formal perf regression tooling is still future work.
+- Durable active leaves, history, and timers now have snapshot/restore APIs; applications still own serialization format and database transactions.
+- SCXML export is implemented for a compact runtime-structure subset; SCXML import is not implemented.
 
 ## Performance Target
 
@@ -149,7 +189,6 @@ Dispatch then searches from active leaf outward through superstates and scans on
 
 Later optimization options:
 
-- Compile transition lookup by `(source, trigger)`.
 - Use dense trigger tables when event enums are suitable.
 - Provide a compile option to trade memory for faster dispatch.
 
@@ -164,12 +203,13 @@ Tasks:
 - Support opt-in declaration-order priority for ambiguous transitions. Done.
 - Move dispatch trace buffers onto `Instance`. Done.
 - Make dispatch allocation-free after `init`. Done.
-- Add `reserve`/capacity planning during instance initialization.
+- Add `reserve`/capacity planning during instance initialization. Done.
 - Compile transition adjacency tables. Done.
+- Compile source+trigger transition groups for high fan-out states. Done.
 - Store active leaves and transition endpoints as dense indices. Done.
 - Use distinct types for dense runtime indices. Done.
-- Ensure repeated `compile`, `init`, and `enter_initial` are leak-free and deterministic.
-- Improve validation error messages or formatting helpers.
+- Ensure repeated `compile`, `init`, and `enter_initial` are leak-free and deterministic. Done.
+- Improve validation error messages further as new validation rules are added.
 - Keep tests focused on exact semantics.
 
 Proposed API:
@@ -204,8 +244,12 @@ Current status:
 - There is one implicit top region.
 - Each superstate with an initial substate owns one internal OR-region.
 - `Region_Def.name` provides a stable string label for application-facing named regions.
+- `Substate_Def.region` lets direct children of an `.And` state attach to a named region.
+- Region-attached substates validate that the region exists and that the parent is an `.And` state.
 - Duplicate non-empty region names under the same superstate are rejected.
 - `active_leaf_in_region` returns the active leaf for a named region without allocation.
+- `region_handle` resolves named regions once to stable compiled handles.
+- `active_leaf_in_region_handle` avoids repeated string lookup for hot integration queries.
 
 This is still a stepping stone. Typed region ids, such as `Region_Def(State, Region)`, may still be worth adding later if string labels feel too weak for larger Odin programs.
 
@@ -276,7 +320,7 @@ substates := [?]sc.Substate_Def(Drone_State, Drone_Region){
 Remaining design questions:
 
 - Should region ids become typed enum values instead of strings?
-- Should substates eventually attach to a region id rather than repeating the superstate relation?
+- Should a future typed region API remove repeated superstate fields from region-attached substates?
 
 Recommendation:
 
@@ -284,6 +328,7 @@ Recommendation:
 - Internally compile an implicit top region.
 - Let region definitions describe regions inside explicit states.
 - Keep string names for now because they preserve the simple `Region_Def(State)` API and avoid wrapper helpers.
+- Use `Region_Handle` for applications that want to resolve names once and avoid string lookup in repeated queries.
 
 ## Phase 3: Orthogonal States
 
@@ -322,12 +367,21 @@ Current implementation status:
 - Explicit `.And` states are executable for direct-child branch regions.
 - Multiple `Region_Def` entries with the same `.And` superstate are entered concurrently.
 - Named direct-child regions are implemented with `Region_Def.name`.
+- Direct child states can set `Substate_Def.region` to belong to a named region without a wrapper branch state.
+- Region membership validation rejects unknown region names and non-`.And` parents.
 - `active_leaf_in_region` provides a stable integration point for larger programs.
+- `Region_Handle` provides a cached, allocation-free region query path while keeping the current string-named API.
 - Transition exit sets now remove all active leaves under the highest state exited by the transition.
 - Dispatch now selects all non-conflicting branch-local transitions enabled by one event.
 - Overlapping transition conflicts use descendant-source priority: child transitions preempt ancestor transitions.
+- Same-depth overlapping transition conflicts return `Dispatch_Status.Conflict` without applying a transition.
+- `last_conflict` exposes both conflicting transition endpoint pairs without increasing `Dispatch_Result` size.
+- `last_conflict_indices` exposes both conflicting transition declaration indices for unambiguous diagnostics.
+- `last_preemption` exposes preempted candidates without always-on trace allocation.
+- `last_preemptions` exposes every recorded preemption for richer debug tooling.
 - Multi-transition macrostep tracing is available through `dispatch_with_trace`; always-on result tracing measured too expensive.
-- Arbitrary region membership is still not implemented; a region currently starts at one direct child branch.
+- `write_scxml` exports compiled state structure, transitions, final states, and history to a compact SCXML subset.
+- Typed region ids are still not implemented; named regions currently use strings.
 
 Entering an `And` state enters the initial state of each region it owns.
 
@@ -350,15 +404,10 @@ Operational
 
 Events can trigger transitions in multiple orthogonal regions during one macrostep.
 
-Remaining semantic questions:
-
-- How should conflicts be reported or traced when ancestor transitions are preempted?
-- Should same-depth overlapping conflicts be rejected by validation, reported at dispatch, or handled by declaration order?
-
 Recommendation:
 
 - Implement SCXML-like deterministic selection rules where possible.
-- Prefer rejecting ambiguous cross-region conflicts during validation or dispatch until semantics are fully specified.
+- Keep rejecting ambiguous cross-region conflicts at dispatch until richer conflict reporting is available.
 - Add tests for every conflict rule.
 
 ## Phase 4: History States
@@ -393,14 +442,16 @@ Current status:
 - History ids must not appear in `State_Def`.
 - Shallow history remembers the last direct child exited under `superstate`.
 - Deep history remembers one nested leaf under `superstate` for OR hierarchies.
+- Deep history under `And` states remembers one leaf per owned region and restores the concurrent configuration.
 - Empty history enters `fallback`.
 - History storage is a dense `State_Index` table on `Instance`.
-- Deep history under `And` states is rejected because it needs to restore multiple active leaves.
+- Deep history for `And` states uses `fallback` when no complete remembered regional configuration exists.
+- `active_history` and `restore_history` let applications persist remembered history without running actions.
 
 Remaining design questions:
 
 - Should history target ids remain values from the state enum, or should transitions grow a typed target union later?
-- Deep history for `And` states needs to restore multiple leaves.
+- Should deep history fallback for `And` states require the fallback to be the superstate itself, or continue accepting any descendant target?
 
 ## Phase 5: Run-To-Completion And Event Raising
 
@@ -422,6 +473,27 @@ dispatch_run_to_completion :: proc(
 	options := Run_To_Completion_Options{},
 ) -> Dispatch_Result(State)
 
+dispatch_run_to_completion_with_trace :: proc(
+	instance: ^Instance($State, $Trigger),
+	event: Event(Trigger),
+	transitions: ^[dynamic]Transition_Step(State),
+	ctx: rawptr = nil,
+	options := Run_To_Completion_Options{},
+) -> Dispatch_Result(State)
+
+enter_initial_run_to_completion :: proc(
+	instance: ^Instance($State, $Trigger),
+	ctx: rawptr = nil,
+	options := Run_To_Completion_Options{},
+) -> Dispatch_Result(State)
+
+enter_initial_run_to_completion_with_trace :: proc(
+	instance: ^Instance($State, $Trigger),
+	transitions: ^[dynamic]Transition_Step(State),
+	ctx: rawptr = nil,
+	options := Run_To_Completion_Options{},
+) -> Dispatch_Result(State)
+
 raise :: proc(ctx: rawptr, event: Event($Trigger)) -> bool
 user_context :: proc(ctx: rawptr) -> rawptr
 ```
@@ -431,15 +503,13 @@ Current status:
 - The instance owns a preallocated internal event queue.
 - `raise` appends to that queue during run-to-completion dispatch.
 - Queue overflow returns `Error`; it does not allocate.
+- `Init_Options.internal_event_capacity` can reserve extra queue capacity during `init`.
 - Normal `dispatch` passes raw user context unchanged.
 - `dispatch_run_to_completion` passes a `Runtime_Context`; actions can call `user_context(ctx)` to recover the application context.
+- `dispatch_run_to_completion_with_trace` fills a caller-owned transition buffer with every applied microstep.
+- `enter_initial_run_to_completion` passes a `Runtime_Context` to startup entry actions, then processes raised events and completion events until stable.
+- Raised internal events broadcast across all active regions and can apply multiple non-conflicting branch transitions in one microstep.
 - Focused tests cover raised events and no-allocation run-to-completion dispatch.
-
-Remaining design questions:
-
-- Should there be a trace variant that records all microsteps and raised events?
-- Should queue capacity be configurable during `init`?
-- How should broadcast-style raised events interact with conflicting transitions across orthogonal regions?
 
 ## Phase 6: Delayed Events
 
@@ -464,6 +534,7 @@ enter_initial_at :: proc(..., now_ms: u64, ...)
 dispatch_at :: proc(..., now_ms: u64, ...)
 dispatch_run_to_completion_at :: proc(..., now_ms: u64, ...)
 dispatch_due_events :: proc(..., now_ms: u64, ...)
+next_due_event_ms :: proc(...) -> (u64, bool)
 ```
 
 Current status:
@@ -472,12 +543,13 @@ Current status:
 - Entering a state arms matching `After_Def` timers.
 - Exiting a state cancels matching active timers.
 - Due timers are processed through the internal event queue and run-to-completion path.
+- Due timer cascades can be recorded with caller-owned trace storage.
+- `next_due_event_ms` returns the earliest active timer for app-owned schedulers.
 - Timer dispatch is allocation-free after `init`.
 
-Remaining design questions:
+Design decision:
 
-- Should there be an API to inspect the next due time for efficient polling?
-- Should after-events be part of run-to-completion dispatch automatically, or only when the app calls `dispatch_due_events`?
+- After-events are app-clock driven and are processed only when the app calls `dispatch_due_events` or `dispatch_due_events_with_trace`.
 
 ## Tests, Examples, And Showcases
 
@@ -694,9 +766,9 @@ Feature value:
 5. Make dispatch allocation-free.
 6. Replace/evolve `Initial_Def` into `Region_Def`. Done for direct-child regions with optional names.
 7. Re-implement current OR semantics on top of regions. Done for current single-region compound states.
-8. Add orthogonal `And` states.
-9. Add real-world orthogonal showcases.
-10. Revisit history states.
+8. Add orthogonal `And` states. Done.
+9. Add real-world orthogonal showcases. Done.
+10. Revisit history states. Done.
 
 ## Definition Of Done For Each Feature
 

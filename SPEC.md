@@ -200,6 +200,7 @@ State_Def :: struct($State: typeid) {
 Substate_Def :: struct($State: typeid) {
 	substate: State,
 	superstate: State,
+	region: string,
 }
 
 Region_Def :: struct($State: typeid) {
@@ -207,6 +208,8 @@ Region_Def :: struct($State: typeid) {
 	superstate: State,
 	initial: State,
 }
+
+Region_Handle :: distinct int
 
 Initial_Def :: struct($State: typeid) {
 	superstate: State,
@@ -235,27 +238,47 @@ After_Def :: struct($State, $Trigger: typeid) {
 	delay_ms: u64,
 	trigger: Trigger,
 }
+
+Timer_Snapshot :: struct($State, $Trigger: typeid) {
+	after_index: int,
+	state: State,
+	due_ms: u64,
+	trigger: Trigger,
+}
+
+History_Snapshot :: struct($State: typeid) {
+	history_index: int,
+	superstate: State,
+	kind: History_Kind,
+	region_index: int,
+	region_name: string,
+	target: State,
+}
 ```
 
 This avoids fake top states, sentinel enum values, `has_*` flags in public chart data, and constructor-only state definitions.
 
 `kind` is optional in ordinary Odin struct literals because the zero value is `.Inferred`. Inferred states are treated as `.Atomic` when they have no substates and `.Or` when they do. Explicit `.Atomic` states may not have substates.
 
-Explicit `.And` states enter all `Region_Def` entries owned by that state. In the current direct-child region model, each region initial must be a direct child branch of the `.And` state, and every direct child branch must have exactly one `Region_Def` or legacy `Initial_Def` owned by that `.And` state. `Region_Def.name` gives orthogonal regions a stable application-facing label; duplicate non-empty names under the same superstate are rejected.
+Explicit `.And` states enter all `Region_Def` entries owned by that state. A direct child can either use the legacy branch model, where a region starts at its `Region_Def.initial`, or set `Substate_Def.region` to the owning `Region_Def.name` so multiple direct children belong to the same named region. `Substate_Def.region` is valid only for direct children of `.And` states, and the named region must exist under that same superstate. Every direct child of an `.And` state must belong to exactly one region. `Region_Def.name` gives orthogonal regions a stable application-facing label; duplicate non-empty names under the same superstate are rejected.
 
-External transitions compute an exit set from the transition source and target. A branch-local transition exits only that branch. A transition that leaves a containing `.And` state exits all active descendant branches before exiting the containing state itself.
+External transitions compute an exit set from the transition source and target. If an external transition targets a descendant of its source, the source is exited and re-entered. A `Local` transition to a descendant preserves the source compound state and only exits the active child path needed to reach the target. A branch-local transition exits only that branch. A transition that leaves a containing `.And` state exits all active descendant branches before exiting the containing state itself.
 
-When one event enables multiple non-conflicting branch-local transitions in active regions, dispatch applies those transitions in the same macrostep. If enabled transitions have overlapping exit sets, the transition whose source is deeper in the state hierarchy preempts the ancestor-sourced transition. This keeps child transition priority consistent across orthogonal regions.
+When one event enables multiple non-conflicting branch-local transitions in active regions, dispatch applies those transitions in the same macrostep. This applies to external events and to raised internal events processed during run-to-completion dispatch. If enabled transitions have overlapping exit sets, the transition whose source is deeper in the state hierarchy preempts the ancestor-sourced transition. If overlapping transitions are from unrelated or same-depth sources, dispatch reports `Conflict`, records the conflicting transition endpoints on the instance for `last_conflict`, and leaves the active configuration unchanged. This keeps child transition priority consistent across orthogonal regions without silently choosing one same-depth branch by active-leaf order.
 
 History is defined with `History_Def`. Its `id` is a transition target token from the user's state enum, but it is not a real active state and should not appear in `states`. When a transition targets that history id, the runtime enters the remembered configuration for `superstate`, or `fallback` if no history has been recorded.
 
-`Shallow` history remembers the last direct child exited under `superstate`. `Deep` history currently remembers one nested active leaf in an OR hierarchy. Deep history for `.And` states is rejected for now because a concurrent state needs to restore multiple active leaves.
+`Shallow` history remembers the last direct child exited under `superstate`. `Deep` history remembers nested active leaves. For OR states this is one leaf; for `.And` states this is one remembered leaf per owned region. If a deep-history `.And` state has no complete remembered configuration yet, the runtime enters `fallback`; using the `.And` superstate itself as the fallback enters its default regional configuration.
 
 Run-to-completion dispatch is available through `dispatch_run_to_completion`. Transition actions can call `raise(ctx, Event(...))` to append internal events to the instance-owned queue. In this mode callbacks receive a `Runtime_Context`, not the raw user pointer directly; use `user_context(ctx)` to recover application context. The ordinary `dispatch` and `dispatch_with_trace` calls continue to pass the raw user `ctx` unchanged.
 
+Initial entry has both simple and run-to-completion forms. `enter_initial` enters the default configuration and stops. `enter_initial_run_to_completion` enters the default configuration with a `Runtime_Context`, then processes raised entry events and completion events until stable. This lets charts whose initial configuration is already complete advance through `Done_Def` transitions at startup without changing the compatibility behavior of `enter_initial`.
+
+Raised internal events are broadcast through the same active-region selection rules as external events. A raised event can therefore advance multiple orthogonal regions in one RTC microstep when their transitions do not conflict.
+
 `Final` states are atomic completion markers. `is_complete` reports whether a state's active regions have all reached final leaves. `Done_Def` maps a completed state to a typed event; during run-to-completion dispatch, entering a final state can raise that completion event automatically.
 
-Delayed events are defined with `After_Def`. Entering `state` arms the timer at `now_ms + delay_ms`, exiting that state cancels it, and `dispatch_due_events(instance, now_ms, ...)` processes due timers through the same internal event queue used by run-to-completion dispatch. The application owns the clock and supplies `now_ms`; the package does not sleep or read wall-clock time.
+Delayed events are defined with `After_Def`. Entering `state` arms the timer at `now_ms + delay_ms`, exiting that state cancels it, and `dispatch_due_events(instance, now_ms, ...)` processes due timers through the same internal event queue used by run-to-completion dispatch. `next_due_event_ms(instance)` returns the earliest active due time for app schedulers. The application owns the clock and supplies `now_ms`; the package does not sleep or read wall-clock time.
 
 ## Chart Definition
 
@@ -294,7 +317,8 @@ Chart :: struct($State, $Trigger: typeid) {
 	def: Chart_Def(State, Trigger),
 
 	// Internal lookup tables, including superstate indexes,
-	// initial-substate indexes, and source transition adjacency.
+	// initial-substate indexes, source transition adjacency,
+	// and source+trigger groups for high fan-out states.
 	// Exact fields are implementation details.
 }
 ```
@@ -312,6 +336,8 @@ Current `Region_Def` entries are compiled into internal regions:
 - One implicit top region contains all top-level states and uses `Chart_Def.initial`.
 - Each `Region_Def` creates one OR-region containing the direct substates of its superstate.
 - Named regions can be queried at runtime by superstate and region name.
+- `region_handle` resolves a named region once to a stable compiled handle.
+- `active_leaf_in_region_handle` uses a resolved handle and avoids repeated string lookup in hot integration code.
 - Current default entry follows the compiled region metadata, not the public definition tables directly.
 
 `Initial_Def` remains as a compatibility type for older code. New code should prefer `Region_Def`.
@@ -322,6 +348,7 @@ Current `Region_Def` entries are compiled into internal regions:
 Transition_Kind :: enum {
 	External,
 	Internal,
+	Local,
 }
 
 Transition_Def :: struct($State, $Trigger: typeid) {
@@ -338,8 +365,8 @@ Transition_Def :: struct($State, $Trigger: typeid) {
 For the MVP:
 
 - Default transition kind is `External`.
-- `Internal` transitions execute an action without exiting or entering states.
-- `Local` transitions are deferred until the semantics are fully specified.
+- `Internal` transitions execute an action without exiting or entering states; because `Transition_Def` has an explicit `target` field, internal transitions must set `target` to the same state as `source`.
+- `Local` transitions execute transition actions and change configuration, but when the target is inside the compound source state they do not exit and re-enter that source state. If a local transition targets outside its source, it behaves like an external transition.
 
 Global transitions are intentionally not part of the first API. Prefer a high-level superstate transition when possible. If truly global transitions are needed later, add an explicit concept instead of overloading missing `source`.
 
@@ -361,12 +388,12 @@ Action :: proc(ctx: rawptr, event: rawptr)
 Guard :: proc(ctx: rawptr, event: rawptr) -> bool
 ```
 
-Open question: callbacks may be clearer if the event parameter is `^Event($Trigger)`, but Odin procedure types cannot easily be generic fields without making every callback type parameterized by `$Trigger`. The simple `rawptr` callback keeps the core type-erased. The event pointer passed to callbacks should point to the full `Event(Event_Enum)` value, not only to the payload:
+Callbacks stay type-erased so chart definitions can keep simple procedure fields. Use `context_as` for ordinary dispatch context, `user_context_as` for run-to-completion callbacks that receive a `Runtime_Context`, and `event_as`/`event_data_as` when a callback wants a typed event or typed payload. The event pointer passed to callbacks points to the full `Event(Event_Enum)` value, not only to the payload:
 
 ```odin
 can_arm :: proc(ctx_raw: rawptr, event_raw: rawptr) -> bool {
-	ctx := cast(^Drone_Ctx)ctx_raw
-	event := cast(^sc.Event(Drone_Event))event_raw
+	ctx := sc.context_as(ctx_raw, Drone_Ctx)
+	event := sc.event_as(event_raw, Drone_Event)
 	return ctx.gps_locked && ctx.battery_percent > 25
 }
 ```
@@ -391,6 +418,15 @@ Compile_Options :: struct {
 	allow_ambiguous_transitions: bool,
 }
 
+Init_Options :: struct {
+	internal_event_capacity: int,
+	active_leaf_capacity: int,
+	trace_capacity: int,
+	configuration_capacity: int,
+	path_capacity: int,
+	transition_scratch_capacity: int,
+}
+
 compile :: proc(
 	out: ^Chart($State, $Trigger),
 	def: Chart_Def(State, Trigger),
@@ -400,6 +436,7 @@ compile :: proc(
 init :: proc(
 	instance: ^Instance($State, $Trigger),
 	chart: ^Chart(State, Trigger),
+	options := Init_Options{},
 ) -> bool
 
 enter_initial :: proc(
@@ -411,6 +448,34 @@ enter_initial_at :: proc(
 	instance: ^Instance($State, $Trigger),
 	now_ms: u64,
 	ctx: rawptr = nil,
+) -> Dispatch_Result(State)
+
+enter_initial_run_to_completion :: proc(
+	instance: ^Instance($State, $Trigger),
+	ctx: rawptr = nil,
+	options := Run_To_Completion_Options{},
+) -> Dispatch_Result(State)
+
+enter_initial_run_to_completion_with_trace :: proc(
+	instance: ^Instance($State, $Trigger),
+	transitions: ^[dynamic]Transition_Step(State),
+	ctx: rawptr = nil,
+	options := Run_To_Completion_Options{},
+) -> Dispatch_Result(State)
+
+enter_initial_run_to_completion_at :: proc(
+	instance: ^Instance($State, $Trigger),
+	now_ms: u64,
+	ctx: rawptr = nil,
+	options := Run_To_Completion_Options{},
+) -> Dispatch_Result(State)
+
+enter_initial_run_to_completion_with_trace_at :: proc(
+	instance: ^Instance($State, $Trigger),
+	transitions: ^[dynamic]Transition_Step(State),
+	now_ms: u64,
+	ctx: rawptr = nil,
+	options := Run_To_Completion_Options{},
 ) -> Dispatch_Result(State)
 
 dispatch :: proc(
@@ -440,9 +505,26 @@ dispatch_run_to_completion :: proc(
 	options := Run_To_Completion_Options{},
 ) -> Dispatch_Result(State)
 
+dispatch_run_to_completion_with_trace :: proc(
+	instance: ^Instance($State, $Trigger),
+	event: Event(Trigger),
+	transitions: ^[dynamic]Transition_Step(State),
+	ctx: rawptr = nil,
+	options := Run_To_Completion_Options{},
+) -> Dispatch_Result(State)
+
 dispatch_run_to_completion_at :: proc(
 	instance: ^Instance($State, $Trigger),
 	event: Event(Trigger),
+	now_ms: u64,
+	ctx: rawptr = nil,
+	options := Run_To_Completion_Options{},
+) -> Dispatch_Result(State)
+
+dispatch_run_to_completion_with_trace_at :: proc(
+	instance: ^Instance($State, $Trigger),
+	event: Event(Trigger),
+	transitions: ^[dynamic]Transition_Step(State),
 	now_ms: u64,
 	ctx: rawptr = nil,
 	options := Run_To_Completion_Options{},
@@ -455,12 +537,71 @@ dispatch_due_events :: proc(
 	options := Run_To_Completion_Options{},
 ) -> Dispatch_Result(State)
 
+dispatch_due_events_with_trace :: proc(
+	instance: ^Instance($State, $Trigger),
+	now_ms: u64,
+	transitions: ^[dynamic]Transition_Step(State),
+	ctx: rawptr = nil,
+	options := Run_To_Completion_Options{},
+) -> Dispatch_Result(State)
+
+last_conflict :: proc(
+	instance: ^Instance($State, $Trigger),
+) -> (Transition_Step(State), Transition_Step(State), bool)
+
+last_conflict_indices :: proc(
+	instance: ^Instance($State, $Trigger),
+) -> (int, int, bool)
+
+last_preemption :: proc(
+	instance: ^Instance($State, $Trigger),
+) -> (Transition_Step(State), Transition_Step(State), bool)
+
+last_preemption_indices :: proc(
+	instance: ^Instance($State, $Trigger),
+) -> (int, int, bool)
+
+last_preemptions :: proc(
+	instance: ^Instance($State, $Trigger),
+	out: ^[dynamic]Transition_Preemption(State),
+)
+
+last_preemption_indices_all :: proc(
+	instance: ^Instance($State, $Trigger),
+	out: ^[dynamic]Transition_Preemption_Index,
+)
+
+next_due_event_ms :: proc(
+	instance: ^Instance($State, $Trigger),
+) -> (u64, bool)
+
 raise :: proc(
 	ctx: rawptr,
 	event: Event($Trigger),
 ) -> bool
 
 user_context :: proc(ctx: rawptr) -> rawptr
+
+context_as :: proc(
+	ctx: rawptr,
+	$Data: typeid,
+) -> ^Data
+
+user_context_as :: proc(
+	ctx: rawptr,
+	$Data: typeid,
+) -> ^Data
+
+event_as :: proc(
+	event_raw: rawptr,
+	$Trigger: typeid,
+) -> ^Event(Trigger)
+
+event_data_as :: proc(
+	event_raw: rawptr,
+	$Trigger: typeid,
+	$Data: typeid,
+) -> ^Data
 
 is_active :: proc(
 	instance: ^Instance($State, $Trigger),
@@ -477,11 +618,69 @@ configuration :: proc(
 	out: ^[dynamic]State,
 )
 
+active_leaves :: proc(
+	instance: ^Instance($State, $Trigger),
+	out: ^[dynamic]State,
+)
+
+restore_active_leaves :: proc(
+	instance: ^Instance($State, $Trigger),
+	leaves: []State,
+) -> bool
+
+active_history :: proc(
+	instance: ^Instance($State, $Trigger),
+	out: ^[dynamic]History_Snapshot(State),
+)
+
+restore_history :: proc(
+	instance: ^Instance($State, $Trigger),
+	history_snapshots: []History_Snapshot(State),
+) -> bool
+
+active_timers :: proc(
+	instance: ^Instance($State, $Trigger),
+	out: ^[dynamic]Timer_Snapshot(State, Trigger),
+)
+
+restore_active_timers :: proc(
+	instance: ^Instance($State, $Trigger),
+	timers: []Timer_Snapshot(State, Trigger),
+) -> bool
+
+region_handle :: proc(
+	chart: ^Chart($State, $Trigger),
+	superstate: State,
+	region_name: string,
+) -> (Region_Handle, bool)
+
 active_leaf_in_region :: proc(
 	instance: ^Instance($State, $Trigger),
 	superstate: State,
 	region_name: string,
 ) -> (State, bool)
+
+active_leaf_in_region_handle :: proc(
+	instance: ^Instance($State, $Trigger),
+	handle: Region_Handle,
+) -> (State, bool)
+
+write_dot :: proc(
+	chart: ^Chart($State, $Trigger),
+	out: ^strings.Builder,
+) -> bool
+
+write_scxml :: proc(
+	chart: ^Chart($State, $Trigger),
+	out: ^strings.Builder,
+	name: string = "statechart",
+) -> bool
+
+write_validation_error :: proc(
+	def: Chart_Def($State, $Trigger),
+	error: Validation_Error,
+	out: ^strings.Builder,
+)
 ```
 
 Example usage:
@@ -516,6 +715,7 @@ Dispatch_Status :: enum {
 	Ignored,
 	Transitioned,
 	Blocked_By_Guard,
+	Conflict,
 	Error,
 }
 
@@ -534,11 +734,39 @@ Transition_Step :: struct($State: typeid) {
 	source: State,
 	target: State,
 }
+
+Transition_Preemption :: struct($State: typeid) {
+	preempted: Transition_Step(State),
+	preempted_by: Transition_Step(State),
+}
+
+Transition_Preemption_Index :: struct {
+	preempted: int,
+	preempted_by: int,
+}
 ```
 
-The dispatch result slices are views into scratch storage owned by the `Instance`. They are valid until the next call that mutates the same instance, such as `dispatch` or `enter_initial`.
+The dispatch result slices are views into scratch storage owned by the `Instance`. They are valid until the next call that mutates the same instance, such as `dispatch`, `enter_initial`, or `enter_initial_run_to_completion`.
 
-`source` and `target` report the last applied transition, preserving the single-transition API. For orthogonal macrosteps that may apply more than one transition, call `dispatch_with_trace` with a caller-owned dynamic array. The function clears and fills that array with all applied transition steps. This keeps normal `dispatch` allocation-free and avoids always-on tracing overhead.
+`source` and `target` report the last applied transition, preserving the single-transition API. For orthogonal macrosteps that may apply more than one transition, call `dispatch_with_trace` with a caller-owned dynamic array. For run-to-completion cascades, call `dispatch_run_to_completion_with_trace` to record every applied transition across the external event and raised internal events, `enter_initial_run_to_completion_with_trace` to record startup cascades after initial entry, or `dispatch_due_events_with_trace` to record due-timer cascades. Initial entry itself is not a transition and is not appended to the trace. These functions clear and fill the caller-owned transition buffer. If transition selection reports `Conflict`, no transitions are applied for the conflicting event, `last_conflict(instance)` returns the two overlapping transition endpoint pairs, and `last_conflict_indices(instance)` returns their declaration indices in `Chart_Def.transitions`. If descendant priority preempts enabled transitions, `last_preemption(instance)` and `last_preemption_indices(instance)` expose the most recent preemption, while `last_preemptions(instance, out)` and `last_preemption_indices_all(instance, out)` write every preemption observed since the current dispatch began into caller-owned buffers. This keeps normal `dispatch` allocation-free, keeps `Dispatch_Result` small, and avoids always-on result growth.
+
+`Init_Options` lets applications reserve instance-owned buffers at initialization. The defaults are compact and sized for ordinary dispatch. For long run-to-completion cascades, unusually wide orthogonal states, or callers that want larger debug traces without dispatch-time allocation, set `trace_capacity`, `configuration_capacity`, `active_leaf_capacity`, `path_capacity`, or `transition_scratch_capacity` explicitly. The runtime uses the larger of the default and requested capacity.
+
+`active_leaves` writes only the active runtime leaf states to a caller-owned buffer. This is the compact shape to persist for database-backed workflows; `configuration` remains the debugging/introspection view that includes active superstates.
+
+`restore_active_leaves` replaces the runtime configuration from a persisted set of active leaf states. It does not run entry or exit actions and does not arm timers. The function validates that every restored state exists, is a runtime leaf, and forms a complete legal configuration, including exactly one active direct child per active region. This is intended for database-backed workflows where the database is the durable source of truth and the chart is the deterministic transition engine.
+
+A typical database-backed command handler loads an aggregate row, calls `restore_active_leaves` with the persisted leaf list, dispatches one event, calls `active_leaves` after a transition, and persists the new leaf list with any domain data and outbox effects in the same transaction.
+
+`active_history` and `restore_history` snapshot and restore remembered shallow/deep history without running actions. A `History_Snapshot` records the `History_Def` declaration index, superstate, history kind, optional compiled region index/name for deep `.And` history, and remembered target state. Restore validates that the declaration still matches and that remembered targets are legal for the history kind. Applications should restore active leaves first, then restore history snapshots, then restore timers if durable timers are also used.
+
+`active_timers` and `restore_active_timers` provide the same snapshot/restore pattern for active delayed events. A `Timer_Snapshot` records the `After_Def` declaration index, active state, due time, and trigger. Restore validates that the declaration still matches and that the timer state is currently active. Applications can persist timer snapshots next to active leaves when delayed events must survive process restarts.
+
+`write_dot` exports a compiled chart to Graphviz DOT using a caller-owned `strings.Builder`. It includes state nodes, containment edges, region initial markers, transition labels, history nodes, and final-state styling. This is an inspection/debugging feature and is not on the dispatch hot path.
+
+`write_scxml` exports a compact SCXML 1.0 subset using a caller-owned `strings.Builder`. It writes atomic states, compound states, parallel states, final states, transitions, and shallow/deep history fallback targets. Runtime callbacks, guards, and action bodies are intentionally not serialized.
+
+`write_validation_error` formats a structured `Validation_Error` into a caller-owned builder. Messages include the error kind plus the relevant state, substate, region/initial/history, or transition table entry when that context is available.
 
 ## Execution Semantics
 
@@ -550,8 +778,8 @@ For the MVP, dispatch is deterministic:
 4. The search continues outward until a transition is found or the event is ignored.
 5. A transition is enabled when the trigger matches and the guard is nil or returns true.
 6. If multiple transitions from the same source match, declaration order wins.
-7. External transition exit order is leaf to least common superstate.
-8. External transition entry order is least common superstate to target leaf.
+7. External transition exit order is leaf to the computed exit boundary.
+8. External transition entry order is exit boundary to target leaf.
 9. When a compound state is targeted, its initial substate chain is entered.
 10. Entry and exit actions execute in the same order as the state entry/exit sequence.
 11. Transition action executes after exits and before entries.
@@ -579,6 +807,11 @@ Compilation should validate:
 - Every state that appears as a superstate has exactly one initial substate.
 - No state that lacks substates appears in the initial-substate table.
 - No state appears as a substate of more than one superstate.
+- Final states have no substates and no outgoing transitions.
+- Done events target states that can complete: compound states or final states.
+- Duplicate done events for the same state/trigger are rejected.
+- Duplicate after events for the same state/delay/trigger are rejected.
+- Internal transitions target their source state.
 - Duplicate transitions with the same source and trigger are rejected by default.
 
 If `Compile_Options.allow_ambiguous_transitions` is true, duplicate source/trigger transitions are accepted and declaration order is priority order.
@@ -587,11 +820,8 @@ If `Compile_Options.allow_ambiguous_transitions` is true, duplicate source/trigg
 
 Planned but not MVP:
 
-- Deep history for `.And` states.
-- Broadcast semantics across all active regions beyond the current queued internal events.
-- DOT graph export.
-- SCXML import/export subset.
-- Typed callback helpers for application contexts and events.
+- Typed region ids and typed region-attached substate definitions.
+- SCXML import subset.
 
 ## Current Recommendation
 

@@ -2,6 +2,7 @@ package main
 
 import "base:runtime"
 import "core:fmt"
+import "core:os"
 import "core:time"
 
 import sc "local:statecharts"
@@ -14,6 +15,7 @@ Bench_State :: enum {
 Bench_Event :: enum {
 	Tick,
 	Raised,
+	Timeout,
 }
 
 Wide_State :: enum {
@@ -73,6 +75,16 @@ raise_bench_event :: proc(ctx: rawptr, event: rawptr) {
 bench_rtc_transitions := [?]sc.Transition_Def(Bench_State, Bench_Event){
 	{source = .A, target = .B, trigger = .Tick, action = raise_bench_event},
 	{source = .B, target = .A, trigger = .Raised},
+}
+
+bench_timer_transitions := [?]sc.Transition_Def(Bench_State, Bench_Event){
+	{source = .A, target = .B, trigger = .Timeout},
+	{source = .B, target = .A, trigger = .Timeout},
+}
+
+bench_after_events := [?]sc.After_Def(Bench_State, Bench_Event){
+	{state = .A, delay_ms = 1, trigger = .Timeout},
+	{state = .B, delay_ms = 1, trigger = .Timeout},
 }
 
 wide_states := [?]sc.State_Def(Wide_State){
@@ -153,6 +165,32 @@ Counting_Allocator :: struct {
 	bytes_requested: int,
 }
 
+Bench_Sample :: struct {
+	ns_total: i64,
+	alloc_calls: int,
+	resize_calls: int,
+	free_calls: int,
+	bytes_requested: int,
+	checksum: int,
+}
+
+Bench_Summary :: struct {
+	best: Bench_Sample,
+	ns_total_sum: i64,
+	alloc_calls_max: int,
+	resize_calls_max: int,
+	free_calls_max: int,
+	bytes_requested_max: int,
+	checksum: int,
+}
+
+Bench_Limit :: struct {
+	label: string,
+	max_best_ns: f64,
+	max_avg_ns: f64,
+	require_zero_allocs: bool,
+}
+
 counting_allocator :: proc(counter: ^Counting_Allocator) -> runtime.Allocator {
 	return runtime.Allocator{
 		procedure = counting_allocator_proc,
@@ -223,6 +261,25 @@ setup_rtc_machine :: proc(chart: ^sc.Chart(Bench_State, Bench_Event), machine: ^
 	assert(ok)
 
 	result := sc.enter_initial(machine)
+	sc.destroy_dispatch_result(&result)
+}
+
+setup_timer_machine :: proc(chart: ^sc.Chart(Bench_State, Bench_Event), machine: ^sc.Instance(Bench_State, Bench_Event)) {
+	chart_def := sc.Chart_Def(Bench_State, Bench_Event){
+		initial = .A,
+		states = bench_states[:],
+		transitions = bench_timer_transitions[:],
+		after_events = bench_after_events[:],
+	}
+
+	compile_result := sc.compile(chart, chart_def)
+	defer sc.destroy_compile_result(&compile_result)
+	assert(compile_result.ok)
+
+	ok := sc.init(machine, chart)
+	assert(ok)
+
+	result := sc.enter_initial_at(machine, 0)
 	sc.destroy_dispatch_result(&result)
 }
 
@@ -323,6 +380,19 @@ run_rtc_dispatch :: proc(machine: ^sc.Instance(Bench_State, Bench_Event), iterat
 	return checksum
 }
 
+run_due_dispatch :: proc(machine: ^sc.Instance(Bench_State, Bench_Event), iterations: int) -> int {
+	checksum := 0
+	for i in 1 ..= iterations {
+		result := sc.dispatch_due_events(machine, u64(i))
+		checksum += int(result.status)
+		checksum += len(result.exited)
+		checksum += len(result.entered)
+		checksum += len(result.configuration)
+		sc.destroy_dispatch_result(&result)
+	}
+	return checksum
+}
+
 run_wide_dispatch :: proc(machine: ^sc.Instance(Wide_State, Wide_Event), iterations: int) -> int {
 	checksum := 0
 	event := sc.Event(Wide_Event){id = .Tick}
@@ -337,37 +407,117 @@ run_wide_dispatch :: proc(machine: ^sc.Instance(Wide_State, Wide_Event), iterati
 	return checksum
 }
 
-measure :: proc(label: string, iterations: int, runner: proc(^sc.Instance(Bench_State, Bench_Event), int) -> int) {
+summarize_sample :: proc(summary: ^Bench_Summary, sample: Bench_Sample, sample_index: int) {
+	if sample_index == 0 || sample.ns_total < summary.best.ns_total {
+		summary.best = sample
+	}
+	summary.ns_total_sum += sample.ns_total
+	if sample.alloc_calls > summary.alloc_calls_max do summary.alloc_calls_max = sample.alloc_calls
+	if sample.resize_calls > summary.resize_calls_max do summary.resize_calls_max = sample.resize_calls
+	if sample.free_calls > summary.free_calls_max do summary.free_calls_max = sample.free_calls
+	if sample.bytes_requested > summary.bytes_requested_max do summary.bytes_requested_max = sample.bytes_requested
+	summary.checksum += sample.checksum
+}
+
+print_summary :: proc(label: string, iterations: int, sample_count: int, summary: Bench_Summary) {
+	best_ns_per_dispatch := sample_best_ns(summary, iterations)
+	avg_ns_per_dispatch := sample_avg_ns(summary, iterations, sample_count)
+	fmt.printf("%s\n", label)
+	fmt.printf("  iterations/sample: %d\n", iterations)
+	fmt.printf("  samples:           %d\n", sample_count)
+	fmt.printf("  best ns/dispatch:  %.2f\n", best_ns_per_dispatch)
+	fmt.printf("  avg ns/dispatch:   %.2f\n", avg_ns_per_dispatch)
+	fmt.printf("  alloc calls max:   %d\n", summary.alloc_calls_max)
+	fmt.printf("  resize calls max:  %d\n", summary.resize_calls_max)
+	fmt.printf("  free calls max:    %d\n", summary.free_calls_max)
+	fmt.printf("  bytes req max:     %d\n", summary.bytes_requested_max)
+	fmt.printf("  checksum:          %d\n\n", summary.checksum)
+}
+
+sample_best_ns :: proc(summary: Bench_Summary, iterations: int) -> f64 {
+	return f64(summary.best.ns_total) / f64(iterations)
+}
+
+sample_avg_ns :: proc(summary: Bench_Summary, iterations: int, sample_count: int) -> f64 {
+	return f64(summary.ns_total_sum) / f64(iterations * sample_count)
+}
+
+check_limit :: proc(summary: Bench_Summary, iterations: int, sample_count: int, limit: Bench_Limit) -> bool {
+	ok := true
+	best_ns := sample_best_ns(summary, iterations)
+	avg_ns := sample_avg_ns(summary, iterations, sample_count)
+
+	if limit.max_best_ns > 0 && best_ns > limit.max_best_ns {
+		fmt.printf(
+			"REGRESSION: %s best %.2f ns exceeds %.2f ns\n",
+			limit.label,
+			best_ns,
+			limit.max_best_ns,
+		)
+		ok = false
+	}
+	if limit.max_avg_ns > 0 && avg_ns > limit.max_avg_ns {
+		fmt.printf(
+			"REGRESSION: %s avg %.2f ns exceeds %.2f ns\n",
+			limit.label,
+			avg_ns,
+			limit.max_avg_ns,
+		)
+		ok = false
+	}
+	if limit.require_zero_allocs &&
+	   (summary.alloc_calls_max != 0 || summary.resize_calls_max != 0 || summary.bytes_requested_max != 0) {
+		fmt.printf(
+			"REGRESSION: %s allocated: alloc=%d resize=%d bytes=%d\n",
+			limit.label,
+			summary.alloc_calls_max,
+			summary.resize_calls_max,
+			summary.bytes_requested_max,
+		)
+		ok = false
+	}
+	return ok
+}
+
+measure :: proc(
+	label: string,
+	iterations: int,
+	sample_count: int,
+	runner: proc(^sc.Instance(Bench_State, Bench_Event), int) -> int,
+) -> Bench_Summary {
 	chart: sc.Chart(Bench_State, Bench_Event)
 	defer sc.destroy_chart(&chart)
 	machine: sc.Instance(Bench_State, Bench_Event)
 	defer sc.destroy_instance(&machine)
 	setup_machine(&chart, &machine)
 
-	counter := Counting_Allocator{backing = context.allocator}
-	old_allocator := context.allocator
-	context.allocator = counting_allocator(&counter)
+	summary := Bench_Summary{}
+	for sample_index in 0 ..< sample_count {
+		counter := Counting_Allocator{backing = context.allocator}
+		old_allocator := context.allocator
+		context.allocator = counting_allocator(&counter)
 
-	start := time.tick_now()
-	checksum := runner(&machine, iterations)
-	duration := time.tick_diff(start, time.tick_now())
+		start := time.tick_now()
+		checksum := runner(&machine, iterations)
+		duration := time.tick_diff(start, time.tick_now())
 
-	context.allocator = old_allocator
+		context.allocator = old_allocator
 
-	ns_total := time.duration_nanoseconds(duration)
-	ns_per_dispatch := f64(ns_total) / f64(iterations)
-	fmt.printf("%s\n", label)
-	fmt.printf("  iterations:       %d\n", iterations)
-	fmt.printf("  total:            %v\n", duration)
-	fmt.printf("  ns/dispatch:      %.2f\n", ns_per_dispatch)
-	fmt.printf("  alloc calls:      %d\n", counter.alloc_calls)
-	fmt.printf("  resize calls:     %d\n", counter.resize_calls)
-	fmt.printf("  free calls:       %d\n", counter.free_calls)
-	fmt.printf("  bytes requested:  %d\n", counter.bytes_requested)
-	fmt.printf("  checksum:         %d\n\n", checksum)
+		summarize_sample(&summary, Bench_Sample{
+			ns_total = time.duration_nanoseconds(duration),
+			alloc_calls = counter.alloc_calls,
+			resize_calls = counter.resize_calls,
+			free_calls = counter.free_calls,
+			bytes_requested = counter.bytes_requested,
+			checksum = checksum,
+		}, sample_index)
+	}
+
+	print_summary(label, iterations, sample_count, summary)
+	return summary
 }
 
-measure_trace :: proc(label: string, iterations: int) {
+measure_trace :: proc(label: string, iterations: int, sample_count: int) -> Bench_Summary {
 	chart: sc.Chart(Bench_State, Bench_Event)
 	defer sc.destroy_chart(&chart)
 	machine: sc.Instance(Bench_State, Bench_Event)
@@ -377,98 +527,189 @@ measure_trace :: proc(label: string, iterations: int) {
 	transitions := make([dynamic]sc.Transition_Step(Bench_State), 0, 1)
 	defer delete(transitions)
 
-	counter := Counting_Allocator{backing = context.allocator}
-	old_allocator := context.allocator
-	context.allocator = counting_allocator(&counter)
+	summary := Bench_Summary{}
+	for sample_index in 0 ..< sample_count {
+		counter := Counting_Allocator{backing = context.allocator}
+		old_allocator := context.allocator
+		context.allocator = counting_allocator(&counter)
 
-	start := time.tick_now()
-	checksum := run_caller_trace_dispatch(&machine, iterations, &transitions)
-	duration := time.tick_diff(start, time.tick_now())
+		start := time.tick_now()
+		checksum := run_caller_trace_dispatch(&machine, iterations, &transitions)
+		duration := time.tick_diff(start, time.tick_now())
 
-	context.allocator = old_allocator
+		context.allocator = old_allocator
 
-	ns_total := time.duration_nanoseconds(duration)
-	ns_per_dispatch := f64(ns_total) / f64(iterations)
-	fmt.printf("%s\n", label)
-	fmt.printf("  iterations:       %d\n", iterations)
-	fmt.printf("  total:            %v\n", duration)
-	fmt.printf("  ns/dispatch:      %.2f\n", ns_per_dispatch)
-	fmt.printf("  alloc calls:      %d\n", counter.alloc_calls)
-	fmt.printf("  resize calls:     %d\n", counter.resize_calls)
-	fmt.printf("  free calls:       %d\n", counter.free_calls)
-	fmt.printf("  bytes requested:  %d\n", counter.bytes_requested)
-	fmt.printf("  checksum:         %d\n\n", checksum)
+		summarize_sample(&summary, Bench_Sample{
+			ns_total = time.duration_nanoseconds(duration),
+			alloc_calls = counter.alloc_calls,
+			resize_calls = counter.resize_calls,
+			free_calls = counter.free_calls,
+			bytes_requested = counter.bytes_requested,
+			checksum = checksum,
+		}, sample_index)
+	}
+
+	print_summary(label, iterations, sample_count, summary)
+	return summary
 }
 
-measure_rtc :: proc(label: string, iterations: int) {
+measure_rtc :: proc(label: string, iterations: int, sample_count: int) -> Bench_Summary {
 	chart: sc.Chart(Bench_State, Bench_Event)
 	defer sc.destroy_chart(&chart)
 	machine: sc.Instance(Bench_State, Bench_Event)
 	defer sc.destroy_instance(&machine)
 	setup_rtc_machine(&chart, &machine)
 
-	counter := Counting_Allocator{backing = context.allocator}
-	old_allocator := context.allocator
-	context.allocator = counting_allocator(&counter)
+	summary := Bench_Summary{}
+	for sample_index in 0 ..< sample_count {
+		counter := Counting_Allocator{backing = context.allocator}
+		old_allocator := context.allocator
+		context.allocator = counting_allocator(&counter)
 
-	start := time.tick_now()
-	checksum := run_rtc_dispatch(&machine, iterations)
-	duration := time.tick_diff(start, time.tick_now())
+		start := time.tick_now()
+		checksum := run_rtc_dispatch(&machine, iterations)
+		duration := time.tick_diff(start, time.tick_now())
 
-	context.allocator = old_allocator
+		context.allocator = old_allocator
 
-	ns_total := time.duration_nanoseconds(duration)
-	ns_per_dispatch := f64(ns_total) / f64(iterations)
-	fmt.printf("%s\n", label)
-	fmt.printf("  iterations:       %d\n", iterations)
-	fmt.printf("  total:            %v\n", duration)
-	fmt.printf("  ns/dispatch:      %.2f\n", ns_per_dispatch)
-	fmt.printf("  alloc calls:      %d\n", counter.alloc_calls)
-	fmt.printf("  resize calls:     %d\n", counter.resize_calls)
-	fmt.printf("  free calls:       %d\n", counter.free_calls)
-	fmt.printf("  bytes requested:  %d\n", counter.bytes_requested)
-	fmt.printf("  checksum:         %d\n\n", checksum)
+		summarize_sample(&summary, Bench_Sample{
+			ns_total = time.duration_nanoseconds(duration),
+			alloc_calls = counter.alloc_calls,
+			resize_calls = counter.resize_calls,
+			free_calls = counter.free_calls,
+			bytes_requested = counter.bytes_requested,
+			checksum = checksum,
+		}, sample_index)
+	}
+
+	print_summary(label, iterations, sample_count, summary)
+	return summary
 }
 
-measure_wide :: proc(label: string, iterations: int, runner: proc(^sc.Instance(Wide_State, Wide_Event), int) -> int) {
+measure_due :: proc(label: string, iterations: int, sample_count: int) -> Bench_Summary {
+	chart: sc.Chart(Bench_State, Bench_Event)
+	defer sc.destroy_chart(&chart)
+
+	summary := Bench_Summary{}
+	for sample_index in 0 ..< sample_count {
+		machine: sc.Instance(Bench_State, Bench_Event)
+		setup_timer_machine(&chart, &machine)
+
+		counter := Counting_Allocator{backing = context.allocator}
+		old_allocator := context.allocator
+		context.allocator = counting_allocator(&counter)
+
+		start := time.tick_now()
+		checksum := run_due_dispatch(&machine, iterations)
+		duration := time.tick_diff(start, time.tick_now())
+
+		context.allocator = old_allocator
+
+		summarize_sample(&summary, Bench_Sample{
+			ns_total = time.duration_nanoseconds(duration),
+			alloc_calls = counter.alloc_calls,
+			resize_calls = counter.resize_calls,
+			free_calls = counter.free_calls,
+			bytes_requested = counter.bytes_requested,
+			checksum = checksum,
+		}, sample_index)
+
+		sc.destroy_instance(&machine)
+	}
+
+	print_summary(label, iterations, sample_count, summary)
+	return summary
+}
+
+measure_wide :: proc(
+	label: string,
+	iterations: int,
+	sample_count: int,
+	runner: proc(^sc.Instance(Wide_State, Wide_Event), int) -> int,
+) -> Bench_Summary {
 	chart: sc.Chart(Wide_State, Wide_Event)
 	defer sc.destroy_chart(&chart)
 	machine: sc.Instance(Wide_State, Wide_Event)
 	defer sc.destroy_instance(&machine)
 	setup_wide_machine(&chart, &machine)
 
-	counter := Counting_Allocator{backing = context.allocator}
-	old_allocator := context.allocator
-	context.allocator = counting_allocator(&counter)
+	summary := Bench_Summary{}
+	for sample_index in 0 ..< sample_count {
+		counter := Counting_Allocator{backing = context.allocator}
+		old_allocator := context.allocator
+		context.allocator = counting_allocator(&counter)
 
-	start := time.tick_now()
-	checksum := runner(&machine, iterations)
-	duration := time.tick_diff(start, time.tick_now())
+		start := time.tick_now()
+		checksum := runner(&machine, iterations)
+		duration := time.tick_diff(start, time.tick_now())
 
-	context.allocator = old_allocator
+		context.allocator = old_allocator
 
-	ns_total := time.duration_nanoseconds(duration)
-	ns_per_dispatch := f64(ns_total) / f64(iterations)
-	fmt.printf("%s\n", label)
-	fmt.printf("  iterations:       %d\n", iterations)
-	fmt.printf("  total:            %v\n", duration)
-	fmt.printf("  ns/dispatch:      %.2f\n", ns_per_dispatch)
-	fmt.printf("  alloc calls:      %d\n", counter.alloc_calls)
-	fmt.printf("  resize calls:     %d\n", counter.resize_calls)
-	fmt.printf("  free calls:       %d\n", counter.free_calls)
-	fmt.printf("  bytes requested:  %d\n", counter.bytes_requested)
-	fmt.printf("  checksum:         %d\n\n", checksum)
+		summarize_sample(&summary, Bench_Sample{
+			ns_total = time.duration_nanoseconds(duration),
+			alloc_calls = counter.alloc_calls,
+			resize_calls = counter.resize_calls,
+			free_calls = counter.free_calls,
+			bytes_requested = counter.bytes_requested,
+			checksum = checksum,
+		}, sample_index)
+	}
+
+	print_summary(label, iterations, sample_count, summary)
+	return summary
 }
 
 main :: proc() {
 	iterations := 2_000_000
+	samples := 5
 	fmt.println("dispatch benchmark")
 	fmt.println("note: allocating mode simulates the previous owned-result/path allocation model")
 	fmt.println()
 
-	measure("scratch-buffer dispatch", iterations, run_scratch_dispatch)
-	measure_trace("caller-owned transition trace dispatch", iterations)
-	measure_rtc("run-to-completion dispatch with one raised event", iterations)
-	measure("allocating trace/path dispatch", iterations, run_allocating_trace_dispatch)
-	measure_wide("wide transition lookup dispatch", iterations, run_wide_dispatch)
+	scratch := measure("scratch-buffer dispatch", iterations, samples, run_scratch_dispatch)
+	trace := measure_trace("caller-owned transition trace dispatch", iterations, samples)
+	rtc := measure_rtc("run-to-completion dispatch with one raised event", iterations, samples)
+	due := measure_due("due timer dispatch", iterations, samples)
+	allocating := measure("allocating trace/path dispatch", iterations, samples, run_allocating_trace_dispatch)
+	wide := measure_wide("wide transition lookup dispatch", iterations, samples, run_wide_dispatch)
+
+	ok := true
+	ok = check_limit(scratch, iterations, samples, Bench_Limit{
+		label = "scratch-buffer dispatch",
+		max_best_ns = 45,
+		max_avg_ns = 55,
+		require_zero_allocs = true,
+	}) && ok
+	ok = check_limit(trace, iterations, samples, Bench_Limit{
+		label = "caller-owned transition trace dispatch",
+		max_best_ns = 55,
+		max_avg_ns = 65,
+		require_zero_allocs = true,
+	}) && ok
+	ok = check_limit(rtc, iterations, samples, Bench_Limit{
+		label = "run-to-completion dispatch with one raised event",
+		max_best_ns = 115,
+		max_avg_ns = 130,
+		require_zero_allocs = true,
+	}) && ok
+	ok = check_limit(due, iterations, samples, Bench_Limit{
+		label = "due timer dispatch",
+		max_best_ns = 80,
+		max_avg_ns = 95,
+		require_zero_allocs = true,
+	}) && ok
+	ok = check_limit(wide, iterations, samples, Bench_Limit{
+		label = "wide transition lookup dispatch",
+		max_best_ns = 50,
+		max_avg_ns = 60,
+		require_zero_allocs = true,
+	}) && ok
+
+	_ = allocating
+	if ok {
+		fmt.println("benchmark guard: PASS")
+	} else {
+		fmt.println("benchmark guard: FAIL")
+		os.exit(1)
+	}
 }

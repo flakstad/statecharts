@@ -76,13 +76,36 @@ main :: proc() {
 	result = sc.dispatch_at(&machine, sc.Event(Session_Event){id = .Connect}, 10_100)
 	sc.destroy_dispatch_result(&result)
 	print_configuration(&machine, "after connect")
+	if due_ms, ok := sc.next_due_event_ms(&machine); ok {
+		fmt.printf("next timer: %d\n", due_ms)
+	}
 
-	result = sc.dispatch_due_events(&machine, 12_099)
+	persisted_leaves := make([dynamic]Session_State, 0, 1)
+	defer delete(persisted_leaves)
+	persisted_timers := make([dynamic]sc.Timer_Snapshot(Session_State, Session_Event), 0, 1)
+	defer delete(persisted_timers)
+	sc.active_leaves(&machine, &persisted_leaves)
+	sc.active_timers(&machine, &persisted_timers)
+
+	restored: sc.Instance(Session_State, Session_Event)
+	ok = sc.init(&restored, &chart)
+	defer sc.destroy_instance(&restored)
+	assert(ok)
+	assert(sc.restore_active_leaves(&restored, persisted_leaves[:]))
+	assert(sc.restore_active_timers(&restored, persisted_timers[:]))
+	print_configuration(&restored, "after restore")
+
+	result = sc.dispatch_due_events(&restored, 12_099)
 	sc.destroy_dispatch_result(&result)
-	print_configuration(&machine, "before timeout")
+	print_configuration(&restored, "before timeout")
 
-	result = sc.dispatch_due_events(&machine, 12_100)
+	trace := make([dynamic]sc.Transition_Step(Session_State), 0, 1)
+	defer delete(trace)
+	result = sc.dispatch_due_events_with_trace(&restored, 12_100, &trace)
 	defer sc.destroy_dispatch_result(&result)
 	fmt.printf("timer status: %v\n", result.status)
-	print_configuration(&machine, "after timeout")
+	for step in trace {
+		fmt.printf("  %v -> %v\n", step.source, step.target)
+	}
+	print_configuration(&restored, "after timeout")
 }
