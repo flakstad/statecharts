@@ -52,6 +52,11 @@ Test_Event :: enum {
   Cancel,
 }
 
+Test_Region :: enum {
+  Arming,
+  Flight,
+}
+
 Test_Ctx :: struct {
   can_arm: bool,
   log: [dynamic]int,
@@ -663,6 +668,94 @@ test_named_and_regions_can_contain_multiple_direct_substates :: proc(t: ^testing
   leaf, ok = active_leaf_in_region_handle(&machine, INVALID_REGION_HANDLE)
   testing.expect(t, !ok)
   testing.expect_value(t, len(machine.active_leaf_indices), 2)
+}
+
+@(test)
+test_typed_regions_expand_to_named_regions_and_support_typed_lookup :: proc(t: ^testing.T) {
+  states := [?]State_Def(Test_State){
+    {id = .Operational, kind = .And},
+    {id = .Armed_Ready},
+    {id = .Operational_Idle},
+    {id = .Flying_Hover},
+    {id = .Flying_Returning_Home},
+  }
+  typed_regions := [?]Typed_Region_Def(Test_State, Test_Region){
+    {id = .Arming, superstate = .Operational, initial = .Armed_Ready},
+    {id = .Flight, superstate = .Operational, initial = .Flying_Hover},
+  }
+  typed_substates := [?]Region_Substate_Def(Test_State, Test_Region){
+    {substate = .Armed_Ready, region = .Arming},
+    {substate = .Operational_Idle, region = .Arming},
+    {substate = .Flying_Hover, region = .Flight},
+    {substate = .Flying_Returning_Home, region = .Flight},
+  }
+  regions := make([dynamic]Region_Def(Test_State), 0, len(typed_regions))
+  defer destroy_typed_region_defs(&regions)
+  substates := make([dynamic]Substate_Def(Test_State), 0, len(typed_substates))
+  defer destroy_typed_region_substate_defs(&substates)
+
+  testing.expect(t, append_typed_region_defs(&regions, typed_regions[:]))
+  testing.expect(t, append_typed_region_substate_defs(&substates, typed_regions[:], typed_substates[:]))
+
+  transitions := [?]Transition_Def(Test_State, Test_Event){
+    {source = .Flying_Hover, target = .Flying_Returning_Home, trigger = .Return_Home},
+  }
+  chart_def := Chart_Def(Test_State, Test_Event){
+    initial = .Operational,
+    states = states[:],
+    substates = substates[:],
+    regions = regions[:],
+    transitions = transitions[:],
+  }
+
+  chart: Chart(Test_State, Test_Event)
+  result := compile(&chart, chart_def)
+  defer destroy_compile_result(&result)
+  defer destroy_chart(&chart)
+  testing.expect(t, result.ok)
+
+  machine: Instance(Test_State, Test_Event)
+  testing.expect(t, init(&machine, &chart))
+  defer destroy_instance(&machine)
+
+  dispatch_result := enter_initial(&machine)
+  destroy_dispatch_result(&dispatch_result)
+
+  arming_leaf, ok := active_leaf_in_typed_region(&machine, Test_State.Operational, Test_Region.Arming)
+  testing.expect(t, ok)
+  testing.expect_value(t, arming_leaf, Test_State.Armed_Ready)
+
+  flight_handle: Region_Handle
+  flight_handle, ok = typed_region_handle(&chart, Test_State.Operational, Test_Region.Flight)
+  testing.expect(t, ok)
+
+  flight_leaf: Test_State
+  flight_leaf, ok = active_leaf_in_region_handle(&machine, flight_handle)
+  testing.expect(t, ok)
+  testing.expect_value(t, flight_leaf, Test_State.Flying_Hover)
+
+  dispatch_result = dispatch(&machine, Event(Test_Event){id = .Return_Home})
+  defer destroy_dispatch_result(&dispatch_result)
+
+  flight_leaf, ok = active_leaf_in_typed_region(&machine, Test_State.Operational, Test_Region.Flight)
+  testing.expect(t, ok)
+  testing.expect_value(t, flight_leaf, Test_State.Flying_Returning_Home)
+}
+
+@(test)
+test_typed_region_substates_reject_unknown_region_id :: proc(t: ^testing.T) {
+  typed_regions := [?]Typed_Region_Def(Test_State, Test_Region){
+    {id = .Arming, superstate = .Operational, initial = .Armed_Ready},
+  }
+  typed_substates := [?]Region_Substate_Def(Test_State, Test_Region){
+    {substate = .Flying_Hover, region = .Flight},
+  }
+  substates := make([dynamic]Substate_Def(Test_State), 0, len(typed_substates))
+  defer destroy_typed_region_substate_defs(&substates)
+
+  ok := append_typed_region_substate_defs(&substates, typed_regions[:], typed_substates[:])
+  testing.expect(t, !ok)
+  testing.expect_value(t, len(substates), 0)
 }
 
 @(test)
@@ -2445,9 +2538,9 @@ test_enter_initial_run_to_completion_processes_always_transition :: proc(t: ^tes
 
 @(test)
 test_run_to_completion_processes_always_transition_after_event :: proc(t: ^testing.T) {
-  states := [?]State_Def(Test_State){
-    {id = .Rtc_Idle},
-    {id = .Rtc_Armed},
+	states := [?]State_Def(Test_State){
+		{id = .Rtc_Idle},
+		{id = .Rtc_Armed},
     {id = .Rtc_Done},
   }
   transitions := [?]Transition_Def(Test_State, Test_Event){
@@ -2486,14 +2579,106 @@ test_run_to_completion_processes_always_transition_after_event :: proc(t: ^testi
   testing.expect_value(t, trace[0].source, Test_State.Rtc_Idle)
   testing.expect_value(t, trace[0].target, Test_State.Rtc_Armed)
   testing.expect_value(t, trace[1].source, Test_State.Rtc_Armed)
-  testing.expect_value(t, trace[1].target, Test_State.Rtc_Done)
-  testing.expect(t, is_active(&machine, Test_State.Rtc_Done))
+	testing.expect_value(t, trace[1].target, Test_State.Rtc_Done)
+	testing.expect(t, is_active(&machine, Test_State.Rtc_Done))
+}
+
+@(test)
+test_always_transitions_broadcast_across_orthogonal_regions :: proc(t: ^testing.T) {
+	states := [?]State_Def(Test_State){
+		{id = .Operational, kind = .And},
+		{id = .Armed, kind = .Or},
+		{id = .Armed_Ready},
+		{id = .Rtc_Armed},
+		{id = .Flying, kind = .Or},
+		{id = .Flying_Hover},
+		{id = .Flying_Returning_Home},
+	}
+	substates := [?]Substate_Def(Test_State){
+		{substate = .Armed, superstate = .Operational},
+		{substate = .Armed_Ready, superstate = .Armed},
+		{substate = .Rtc_Armed, superstate = .Armed},
+		{substate = .Flying, superstate = .Operational},
+		{substate = .Flying_Hover, superstate = .Flying},
+		{substate = .Flying_Returning_Home, superstate = .Flying},
+	}
+	regions := [?]Region_Def(Test_State){
+		{superstate = .Operational, initial = .Armed},
+		{superstate = .Operational, initial = .Flying},
+		{superstate = .Armed, initial = .Armed_Ready},
+		{superstate = .Flying, initial = .Flying_Hover},
+	}
+	always := [?]Always_Def(Test_State){
+		{source = .Armed_Ready, target = .Rtc_Armed},
+		{source = .Flying_Hover, target = .Flying_Returning_Home},
+	}
+	chart_def := Chart_Def(Test_State, Test_Event){
+		initial = .Operational,
+		states = states[:],
+		substates = substates[:],
+		regions = regions[:],
+		always_transitions = always[:],
+	}
+
+	chart: Chart(Test_State, Test_Event)
+	compile_result := compile(&chart, chart_def)
+	defer destroy_compile_result(&compile_result)
+	defer destroy_chart(&chart)
+	testing.expect(t, compile_result.ok)
+
+	machine: Instance(Test_State, Test_Event)
+	testing.expect(t, init(&machine, &chart))
+	defer destroy_instance(&machine)
+
+	trace := make([dynamic]Transition_Step(Test_State), 0, 2)
+	defer delete(trace)
+	result := enter_initial_run_to_completion_with_trace(&machine, &trace)
+	defer destroy_dispatch_result(&result)
+
+	testing.expect_value(t, result.status, Dispatch_Status.Transitioned)
+	testing.expect_value(t, len(trace), 2)
+	testing.expect(t, is_active(&machine, Test_State.Rtc_Armed))
+	testing.expect(t, is_active(&machine, Test_State.Flying_Returning_Home))
+}
+
+@(test)
+test_restored_active_leaf_can_be_stabilized_by_always_transition :: proc(t: ^testing.T) {
+	states := [?]State_Def(Test_State){
+		{id = .Rtc_Idle},
+		{id = .Rtc_Done},
+	}
+	always := [?]Always_Def(Test_State){
+		{source = .Rtc_Idle, target = .Rtc_Done},
+	}
+	chart_def := Chart_Def(Test_State, Test_Event){
+		initial = .Rtc_Idle,
+		states = states[:],
+		always_transitions = always[:],
+	}
+
+	chart: Chart(Test_State, Test_Event)
+	compile_result := compile(&chart, chart_def)
+	defer destroy_compile_result(&compile_result)
+	defer destroy_chart(&chart)
+	testing.expect(t, compile_result.ok)
+
+	machine: Instance(Test_State, Test_Event)
+	testing.expect(t, init(&machine, &chart))
+	defer destroy_instance(&machine)
+	leaves := [?]Test_State{.Rtc_Idle}
+	testing.expect(t, restore_active_leaves(&machine, leaves[:]))
+
+	result := dispatch_due_events(&machine, 1_000)
+	defer destroy_dispatch_result(&result)
+
+	testing.expect_value(t, result.status, Dispatch_Status.Transitioned)
+	testing.expect(t, is_active(&machine, Test_State.Rtc_Done))
 }
 
 @(test)
 test_always_transition_does_not_allocate_after_init :: proc(t: ^testing.T) {
-  states := [?]State_Def(Test_State){
-    {id = .Rtc_Idle},
+	states := [?]State_Def(Test_State){
+		{id = .Rtc_Idle},
     {id = .Rtc_Done},
   }
   always := [?]Always_Def(Test_State){

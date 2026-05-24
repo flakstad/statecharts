@@ -25,7 +25,7 @@ This package implements a deterministic statechart runtime for Odin, inspired by
 - **Trigger**: The event that enables a transition.
 - **Guard**: A condition that must be true for a transition to fire.
 - **Action**: Code executed as part of a transition, entry, or exit.
-- **Configuration**: The current active state set. In the MVP, this is one active leaf plus its active superstates. With orthogonal states, this becomes multiple active leaves plus their superstates.
+- **Configuration**: The current active state set. For orthogonal states, this can include multiple active leaves plus their active superstates.
 
 ## User-Facing Shape
 
@@ -260,7 +260,7 @@ This avoids fake top states, sentinel enum values, `has_*` flags in public chart
 
 `kind` is optional in ordinary Odin struct literals because the zero value is `.Inferred`. Inferred states are treated as `.Atomic` when they have no substates and `.Or` when they do. Explicit `.Atomic` states may not have substates.
 
-Explicit `.And` states enter all `Region_Def` entries owned by that state. A direct child can either use the legacy branch model, where a region starts at its `Region_Def.initial`, or set `Substate_Def.region` to the owning `Region_Def.name` so multiple direct children belong to the same named region. `Substate_Def.region` is valid only for direct children of `.And` states, and the named region must exist under that same superstate. Every direct child of an `.And` state must belong to exactly one region. `Region_Def.name` gives orthogonal regions a stable application-facing label; duplicate non-empty names under the same superstate are rejected.
+Explicit `.And` states enter all `Region_Def` entries owned by that state. A direct child can either use the legacy branch model, where a region starts at its `Region_Def.initial`, or set `Substate_Def.region` to the owning `Region_Def.name` so multiple direct children belong to the same named region. `Substate_Def.region` is valid only for direct children of `.And` states, and the named region must exist under that same superstate. Every direct child of an `.And` state must belong to exactly one region. `Region_Def.name` gives orthogonal regions a stable application-facing label; duplicate non-empty names under the same superstate are rejected. For applications that prefer enum-like region identities, `Typed_Region_Def` and `Region_Substate_Def` can expand typed region ids into ordinary `Region_Def` and `Substate_Def` tables before compile, and `typed_region_handle` / `active_leaf_in_typed_region` provide typed lookup wrappers at runtime.
 
 External transitions compute an exit set from the transition source and target. If an external transition targets a descendant of its source, the source is exited and re-entered. A `Local` transition to a descendant preserves the source compound state and only exits the active child path needed to reach the target. A branch-local transition exits only that branch. A transition that leaves a containing `.And` state exits all active descendant branches before exiting the containing state itself.
 
@@ -374,7 +374,7 @@ Always_Def :: struct($State: typeid) {
 }
 ```
 
-For the MVP:
+Transition kinds:
 
 - Default transition kind is `External`.
 - `Internal` transitions execute an action without exiting or entering states; because `Transition_Def` has an explicit `target` field, internal transitions must set `target` to the same state as `source`.
@@ -774,6 +774,8 @@ A typical database-backed command handler loads an aggregate row, calls `restore
 
 `active_timers` and `restore_active_timers` provide the same snapshot/restore pattern for active delayed events. A `Timer_Snapshot` records the `After_Def` declaration index, active state, due time, and trigger. Restore validates that the declaration still matches and that the timer state is currently active. Applications can persist timer snapshots next to active leaves when delayed events must survive process restarts.
 
+`append_typed_region_defs` and `append_typed_region_substate_defs` are definition-building helpers for typed orthogonal region ids. They derive stable region names from the region id's `%v` formatting and allocate cloned region-name strings in the caller's allocator; use `destroy_typed_region_defs` and `destroy_typed_region_substate_defs` after the compiled chart no longer needs those definition slices.
+
 `write_dot` exports a compiled chart to Graphviz DOT using a caller-owned `strings.Builder`. It includes state nodes, containment edges, region initial markers, transition labels, history nodes, and final-state styling. This is an inspection/debugging feature and is not on the dispatch hot path.
 
 `write_scxml` exports a compact SCXML 1.0 subset using a caller-owned `strings.Builder`. It writes atomic states, compound states, parallel states, final states, transitions, and shallow/deep history fallback targets. Runtime callbacks, guards, and action bodies are intentionally not serialized.
@@ -782,7 +784,7 @@ A typical database-backed command handler loads an aggregate row, calls `restore
 
 ## Execution Semantics
 
-For the MVP, dispatch is deterministic:
+Dispatch is deterministic:
 
 1. A dispatch processes one external event.
 2. The active leaf state is searched first.
@@ -831,12 +833,11 @@ Compilation should validate:
 
 If `Compile_Options.allow_ambiguous_transitions` is true, duplicate source/trigger transitions and duplicate always transitions from the same source are accepted and declaration order is priority order.
 
-## Future Features
+## Deferred Features
 
-Planned but not MVP:
+Not planned for the near-term library:
 
-- Typed region ids and typed region-attached substate definitions.
-- SCXML import subset.
+- SCXML import. `write_scxml` is useful as an offline export/review format, but importing SCXML would either need string-to-domain mapping hooks for user enums or a separate stringly chart representation. That would add API and maintenance surface without helping the runtime semantics or hot path, so it is intentionally deferred.
 
 ## Current Recommendation
 
@@ -847,6 +848,8 @@ sc.Transition_Def(Drone_State, Drone_Event)
 sc.State_Def(Drone_State)
 sc.Substate_Def(Drone_State)
 sc.Region_Def(Drone_State)
+sc.Typed_Region_Def(Drone_State, Drone_Region)
+sc.Region_Substate_Def(Drone_State, Drone_Region)
 sc.Chart_Def(Drone_State, Drone_Event)
 sc.Instance(Drone_State, Drone_Event)
 ```

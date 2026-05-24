@@ -1,6 +1,6 @@
 # Roadmap
 
-This package should grow from the current hierarchical statechart MVP into a practical, efficient Harel-style statechart engine for real software systems.
+This package has grown from a hierarchical statechart MVP into a practical, efficient Harel-style statechart engine for real software systems.
 
 The long-term target is not just "an FSM helper." The goal is a deterministic statechart runtime that can model complex contained systems with hierarchy, orthogonality, history, and run-to-completion semantics while staying efficient enough for game loops, robotics, embedded-style control, and other performance-sensitive Odin programs.
 
@@ -14,7 +14,7 @@ The long-term target is not just "an FSM helper." The goal is a deterministic st
 - Prefer validation errors at compile time over surprising runtime behavior.
 - Grow toward real Harel statecharts in layers.
 
-## Current MVP
+## Current Status
 
 Implemented:
 
@@ -107,16 +107,25 @@ Implemented:
 - An SCXML export showcase demonstrates emitting XML from a compiled chart.
 - `write_validation_error` formats structured compile errors into contextual messages.
 - A validation errors showcase demonstrates user-facing compile diagnostics.
+- `Typed_Region_Def` and `Region_Substate_Def` let applications define orthogonal regions with enum-like ids, then expand them into the stable named-region runtime representation.
+- `typed_region_handle` and `active_leaf_in_typed_region` provide typed wrappers for repeated region lookup.
+- A drone operations showcase demonstrates the functional-core/imperative-shell boundary: sensors and pilot input become events, the chart owns legal mode transitions, and actions enqueue commands for the application shell.
 
-Known MVP limitations:
+Current boundaries:
 
-- Full typed orthogonal region ids are not implemented.
-- Current `And` support has named direct-child region membership and cached `Region_Handle` lookups; typed region ids are not implemented.
+- Typed orthogonal region ids are implemented as definition-building and lookup helpers over named regions; the compiled chart representation still stores stable region names.
 - Wall-clock integration is application-owned; the package only consumes caller-provided `now_ms`.
 - Transition lookup keeps a direct scan for tiny source ranges and uses compiled source+trigger groups for high fan-out states.
 - The dispatch benchmark now reports repeated-sample best/average results and includes a due-timer path, but more formal perf regression tooling is still future work.
 - Durable active leaves, history, and timers now have snapshot/restore APIs; applications still own serialization format and database transactions.
-- SCXML export is implemented for a compact runtime-structure subset; SCXML import is not implemented.
+- SCXML export is implemented for a compact runtime-structure subset. SCXML import is intentionally deferred because the runtime is typed over user enums and import would need either caller-provided id resolvers or a separate stringly chart model.
+
+What remains:
+
+- Keep hardening semantics with focused edge-case tests as real usage reveals them.
+- Keep the benchmark guard tight enough to catch accidental allocation or severe dispatch regressions.
+- Add more examples only when they demonstrate a new integration pattern; the core Harel semantics are now broadly covered.
+- Treat SCXML import as out of scope unless a concrete project needs it enough to justify the resolver/string-model API.
 
 ## Performance Target
 
@@ -254,13 +263,13 @@ Current status:
 
 This is still a stepping stone. Typed region ids, such as `Region_Def(State, Region)`, may still be worth adding later if string labels feel too weak for larger Odin programs.
 
-Replace or evolve:
+The original design question was whether to replace or evolve:
 
 ```odin
-Region_Def
+Region_Def(State)
 ```
 
-into:
+into a fully generic public chart type:
 
 ```odin
 Region_Def :: struct($State, $Region: typeid) {
@@ -288,7 +297,7 @@ Substate_Def :: struct($State, $Region: typeid) {
 }
 ```
 
-The region defines the containing superstate. This avoids repeating the superstate on every substate and gives orthogonal regions a clean identity.
+The region defines the containing superstate. This avoids repeating the superstate on every substate and gives orthogonal regions a clean identity. The current implementation keeps the stable `Region_Def(State)` and `Substate_Def(State)` runtime representation, then offers typed builder helpers that expand enum ids into named regions before compile.
 
 Example:
 
@@ -302,13 +311,13 @@ Drone_Region :: enum {
 	Payload,
 }
 
-regions := [?]sc.Region_Def(Drone_State, Drone_Region){
+typed_regions := [?]sc.Typed_Region_Def(Drone_State, Drone_Region){
 	{id = .Operation, superstate = .Operational, initial = .Flight_Idle},
 	{id = .Radio, superstate = .Operational, initial = .Radio_Connected},
 	{id = .Battery, superstate = .Operational, initial = .Battery_Normal},
 }
 
-substates := [?]sc.Substate_Def(Drone_State, Drone_Region){
+typed_substates := [?]sc.Region_Substate_Def(Drone_State, Drone_Region){
 	{substate = .Flight_Idle, region = .Operation},
 	{substate = .Flight_Mission, region = .Operation},
 	{substate = .Radio_Connected, region = .Radio},
@@ -318,18 +327,27 @@ substates := [?]sc.Substate_Def(Drone_State, Drone_Region){
 }
 ```
 
+The helpers fill caller-owned dynamic `Region_Def` and `Substate_Def` arrays:
+
+```odin
+regions := make([dynamic]sc.Region_Def(Drone_State))
+substates := make([dynamic]sc.Substate_Def(Drone_State))
+ok := sc.append_typed_region_defs(&regions, typed_regions[:])
+ok = ok && sc.append_typed_region_substate_defs(&substates, typed_regions[:], typed_substates[:])
+```
+
 Remaining design questions:
 
-- Should region ids become typed enum values instead of strings?
-- Should a future typed region API remove repeated superstate fields from region-attached substates?
+- Should a future major-version API make region ids part of `Chart_Def` directly, or is the helper layer enough?
 
 Recommendation:
 
 - Keep the current no-fake-top public model.
 - Internally compile an implicit top region.
 - Let region definitions describe regions inside explicit states.
-- Keep string names for now because they preserve the simple `Region_Def(State)` API and avoid wrapper helpers.
-- Use `Region_Handle` for applications that want to resolve names once and avoid string lookup in repeated queries.
+- Keep string names as the compiled/runtime representation because they preserve the simple `Chart_Def(State, Trigger)` API.
+- Use typed region helpers when the application wants enum ids in source definitions.
+- Use `Region_Handle` or `typed_region_handle` for applications that want to resolve names once and avoid string lookup in repeated queries.
 
 ## Phase 3: Orthogonal States
 
@@ -382,7 +400,7 @@ Current implementation status:
 - `last_preemptions` exposes every recorded preemption for richer debug tooling.
 - Multi-transition macrostep tracing is available through `dispatch_with_trace`; always-on result tracing measured too expensive.
 - `write_scxml` exports compiled state structure, transitions, final states, and history to a compact SCXML subset.
-- Typed region ids are still not implemented; named regions currently use strings.
+- Typed region helper APIs let applications define regions with enum-like ids while the compiled runtime keeps stable string names and cached `Region_Handle` lookups.
 
 Entering an `And` state enters the initial state of each region it owns.
 

@@ -2,6 +2,8 @@
 
 This example shows how the statechart fits into a larger program. The statechart is the operations brain: it decides which mode the drone is in, which transitions are legal, and which commands should be issued when transitions happen.
 
+The runnable version lives in `showcases/drone_operations/drone_operations.odin`. This document keeps the architectural explanation and larger-codebase shape; the showcase is the compact executable simulation used by the verification sweep.
+
 The surrounding program still owns:
 
 - Sensor polling.

@@ -141,11 +141,6 @@ enter_initial_run_to_completion :: proc(
     overflow = &overflow,
   }
 
-  max_internal_events := options.max_internal_events
-  if max_internal_events <= 0 {
-    max_internal_events = cap(instance.internal_event_queue)
-  }
-
   entered_start := len(instance.entered_scratch)
   enter_from_index(instance, initial_idx, &runtime_ctx, nil, &result)
   raise_completion_events(instance, &runtime_ctx, entered_start)
@@ -157,64 +152,10 @@ enter_initial_run_to_completion :: proc(
 
   transitioned := true
   blocked_by_guard := false
-  read_index := 0
-  processed_internal_events := 0
-  for read_index < len(instance.internal_event_queue) {
-    if processed_internal_events >= max_internal_events {
-      result.status = .Error
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-
-    event_value := instance.internal_event_queue[read_index]
-    read_index += 1
-    processed_internal_events += 1
-
-    entered_start = len(instance.entered_scratch)
-    dispatch_event_step(instance, &event_value, &runtime_ctx, &result)
-    if result.status == .Transitioned {
-      raise_completion_events(instance, &runtime_ctx, entered_start)
-    }
-    if result.status == .Conflict {
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-    if result.status == .Error || overflow {
-      result.status = .Error
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-    if result.status == .Transitioned {
-      transitioned = true
-    } else if result.status == .Blocked_By_Guard {
-      blocked_by_guard = true
-    }
+  if !rtc_stabilize(instance, &runtime_ctx, &result, rtc_max_steps(instance, options), &overflow, &transitioned, &blocked_by_guard) {
+    return result
   }
-
-  clear(&instance.internal_event_queue)
-  if len(instance.chart.def.always_transitions) != 0 {
-    if !rtc_process_always_until_stable(
-      instance,
-	&runtime_ctx,
-	&result,
-      max_internal_events,
-	&overflow,
-	&transitioned,
-	&blocked_by_guard,
-    ) {
-      return result
-    }
-  }
-  clear(&instance.internal_event_queue)
-  if transitioned {
-    result.status = .Transitioned
-  } else if blocked_by_guard {
-    result.status = .Blocked_By_Guard
-  } else {
-    result.status = .Ignored
-  }
-  write_configuration_scratch(instance)
-  finalize_dispatch_result(instance, &result)
+  rtc_finalize(instance, &result, transitioned, blocked_by_guard)
   return result
 }
 
@@ -257,11 +198,6 @@ enter_initial_run_to_completion_with_trace :: proc(
     overflow = &overflow,
   }
 
-  max_internal_events := options.max_internal_events
-  if max_internal_events <= 0 {
-    max_internal_events = cap(instance.internal_event_queue)
-  }
-
   entered_start := len(instance.entered_scratch)
   enter_from_index(instance, initial_idx, &runtime_ctx, nil, &result)
   raise_completion_events(instance, &runtime_ctx, entered_start)
@@ -273,65 +209,10 @@ enter_initial_run_to_completion_with_trace :: proc(
 
   transitioned := true
   blocked_by_guard := false
-  read_index := 0
-  processed_internal_events := 0
-  for read_index < len(instance.internal_event_queue) {
-    if processed_internal_events >= max_internal_events {
-      result.status = .Error
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-
-    event_value := instance.internal_event_queue[read_index]
-    read_index += 1
-    processed_internal_events += 1
-
-    entered_start = len(instance.entered_scratch)
-    dispatch_event_step_with_trace(instance, &event_value, transitions, &runtime_ctx, &result)
-    if result.status == .Transitioned {
-      raise_completion_events(instance, &runtime_ctx, entered_start)
-    }
-    if result.status == .Conflict {
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-    if result.status == .Error || overflow {
-      result.status = .Error
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-    if result.status == .Transitioned {
-      transitioned = true
-    } else if result.status == .Blocked_By_Guard {
-      blocked_by_guard = true
-    }
+  if !rtc_stabilize_with_trace(instance, &runtime_ctx, transitions, &result, rtc_max_steps(instance, options), &overflow, &transitioned, &blocked_by_guard) {
+    return result
   }
-
-  clear(&instance.internal_event_queue)
-  if len(instance.chart.def.always_transitions) != 0 {
-    if !rtc_process_always_until_stable_with_trace(
-      instance,
-	&runtime_ctx,
-      transitions,
-	&result,
-      max_internal_events,
-	&overflow,
-	&transitioned,
-	&blocked_by_guard,
-    ) {
-      return result
-    }
-  }
-  clear(&instance.internal_event_queue)
-  if transitioned {
-    result.status = .Transitioned
-  } else if blocked_by_guard {
-    result.status = .Blocked_By_Guard
-  } else {
-    result.status = .Ignored
-  }
-  write_configuration_scratch(instance)
-  finalize_dispatch_result(instance, &result)
+  rtc_finalize(instance, &result, transitioned, blocked_by_guard)
   return result
 }
 
@@ -396,11 +277,6 @@ dispatch_run_to_completion :: proc(
     overflow = &overflow,
   }
 
-  max_internal_events := options.max_internal_events
-  if max_internal_events <= 0 {
-    max_internal_events = cap(instance.internal_event_queue)
-  }
-
   transitioned := false
   blocked_by_guard := false
 
@@ -425,64 +301,10 @@ dispatch_run_to_completion :: proc(
     blocked_by_guard = true
   }
 
-  read_index := 0
-  processed_internal_events := 0
-  for read_index < len(instance.internal_event_queue) {
-    if processed_internal_events >= max_internal_events {
-      result.status = .Error
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-
-    event_value = instance.internal_event_queue[read_index]
-    read_index += 1
-    processed_internal_events += 1
-
-    entered_start = len(instance.entered_scratch)
-    dispatch_event_step(instance, &event_value, &runtime_ctx, &result)
-    if result.status == .Transitioned {
-      raise_completion_events(instance, &runtime_ctx, entered_start)
-    }
-    if result.status == .Conflict {
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-    if result.status == .Error || overflow {
-      result.status = .Error
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-    if result.status == .Transitioned {
-      transitioned = true
-    } else if result.status == .Blocked_By_Guard {
-      blocked_by_guard = true
-    }
+  if !rtc_stabilize(instance, &runtime_ctx, &result, rtc_max_steps(instance, options), &overflow, &transitioned, &blocked_by_guard) {
+    return result
   }
-
-  clear(&instance.internal_event_queue)
-  if len(instance.chart.def.always_transitions) != 0 {
-    if !rtc_process_always_until_stable(
-      instance,
-	&runtime_ctx,
-	&result,
-      max_internal_events,
-	&overflow,
-	&transitioned,
-	&blocked_by_guard,
-    ) {
-      return result
-    }
-  }
-  clear(&instance.internal_event_queue)
-  if transitioned {
-    result.status = .Transitioned
-  } else if blocked_by_guard {
-    result.status = .Blocked_By_Guard
-  } else {
-    result.status = .Ignored
-  }
-  write_configuration_scratch(instance)
-  finalize_dispatch_result(instance, &result)
+  rtc_finalize(instance, &result, transitioned, blocked_by_guard)
   return result
 }
 
@@ -510,11 +332,6 @@ dispatch_run_to_completion_with_trace :: proc(
     overflow = &overflow,
   }
 
-  max_internal_events := options.max_internal_events
-  if max_internal_events <= 0 {
-    max_internal_events = cap(instance.internal_event_queue)
-  }
-
   transitioned := false
   blocked_by_guard := false
 
@@ -539,65 +356,10 @@ dispatch_run_to_completion_with_trace :: proc(
     blocked_by_guard = true
   }
 
-  read_index := 0
-  processed_internal_events := 0
-  for read_index < len(instance.internal_event_queue) {
-    if processed_internal_events >= max_internal_events {
-      result.status = .Error
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-
-    event_value = instance.internal_event_queue[read_index]
-    read_index += 1
-    processed_internal_events += 1
-
-    entered_start = len(instance.entered_scratch)
-    dispatch_event_step_with_trace(instance, &event_value, transitions, &runtime_ctx, &result)
-    if result.status == .Transitioned {
-      raise_completion_events(instance, &runtime_ctx, entered_start)
-    }
-    if result.status == .Conflict {
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-    if result.status == .Error || overflow {
-      result.status = .Error
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-    if result.status == .Transitioned {
-      transitioned = true
-    } else if result.status == .Blocked_By_Guard {
-      blocked_by_guard = true
-    }
+  if !rtc_stabilize_with_trace(instance, &runtime_ctx, transitions, &result, rtc_max_steps(instance, options), &overflow, &transitioned, &blocked_by_guard) {
+    return result
   }
-
-  clear(&instance.internal_event_queue)
-  if len(instance.chart.def.always_transitions) != 0 {
-    if !rtc_process_always_until_stable_with_trace(
-      instance,
-	&runtime_ctx,
-      transitions,
-	&result,
-      max_internal_events,
-	&overflow,
-	&transitioned,
-	&blocked_by_guard,
-    ) {
-      return result
-    }
-  }
-  clear(&instance.internal_event_queue)
-  if transitioned {
-    result.status = .Transitioned
-  } else if blocked_by_guard {
-    result.status = .Blocked_By_Guard
-  } else {
-    result.status = .Ignored
-  }
-  write_configuration_scratch(instance)
-  finalize_dispatch_result(instance, &result)
+  rtc_finalize(instance, &result, transitioned, blocked_by_guard)
   return result
 }
 
@@ -659,72 +421,12 @@ dispatch_due_events :: proc(
     return result
   }
 
-  max_internal_events := options.max_internal_events
-  if max_internal_events <= 0 {
-    max_internal_events = cap(instance.internal_event_queue)
-  }
-
   transitioned := false
   blocked_by_guard := false
-  read_index := 0
-  processed_internal_events := 0
-  for read_index < len(instance.internal_event_queue) {
-    if processed_internal_events >= max_internal_events {
-      result.status = .Error
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-
-    event_value := instance.internal_event_queue[read_index]
-    read_index += 1
-    processed_internal_events += 1
-
-    entered_start := len(instance.entered_scratch)
-    dispatch_event_step(instance, &event_value, &runtime_ctx, &result)
-    if result.status == .Transitioned {
-      raise_completion_events(instance, &runtime_ctx, entered_start)
-      enqueue_due_events(instance, &runtime_ctx, now_ms)
-    }
-    if result.status == .Conflict {
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-    if result.status == .Error || overflow {
-      result.status = .Error
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-    if result.status == .Transitioned {
-      transitioned = true
-    } else if result.status == .Blocked_By_Guard {
-      blocked_by_guard = true
-    }
+  if !rtc_stabilize_due(instance, &runtime_ctx, &result, rtc_max_steps(instance, options), now_ms, &overflow, &transitioned, &blocked_by_guard) {
+    return result
   }
-
-  clear(&instance.internal_event_queue)
-  if len(instance.chart.def.always_transitions) != 0 {
-    if !rtc_process_always_until_stable(
-      instance,
-	&runtime_ctx,
-	&result,
-      max_internal_events,
-	&overflow,
-	&transitioned,
-	&blocked_by_guard,
-    ) {
-      return result
-    }
-  }
-  clear(&instance.internal_event_queue)
-  if transitioned {
-    result.status = .Transitioned
-  } else if blocked_by_guard {
-    result.status = .Blocked_By_Guard
-  } else {
-    result.status = .Ignored
-  }
-  write_configuration_scratch(instance)
-  finalize_dispatch_result(instance, &result)
+  rtc_finalize(instance, &result, transitioned, blocked_by_guard)
   return result
 }
 
@@ -765,63 +467,28 @@ dispatch_due_events_with_trace :: proc(
     return result
   }
 
-  max_internal_events := options.max_internal_events
-  if max_internal_events <= 0 {
-    max_internal_events = cap(instance.internal_event_queue)
-  }
-
   transitioned := false
   blocked_by_guard := false
-  read_index := 0
-  processed_internal_events := 0
-  for read_index < len(instance.internal_event_queue) {
-    if processed_internal_events >= max_internal_events {
-      result.status = .Error
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-
-    event_value := instance.internal_event_queue[read_index]
-    read_index += 1
-    processed_internal_events += 1
-
-    entered_start := len(instance.entered_scratch)
-    dispatch_event_step_with_trace(instance, &event_value, transitions, &runtime_ctx, &result)
-    if result.status == .Transitioned {
-      raise_completion_events(instance, &runtime_ctx, entered_start)
-      enqueue_due_events(instance, &runtime_ctx, now_ms)
-    }
-    if result.status == .Conflict {
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-    if result.status == .Error || overflow {
-      result.status = .Error
-      finalize_dispatch_result(instance, &result)
-      return result
-    }
-    if result.status == .Transitioned {
-      transitioned = true
-    } else if result.status == .Blocked_By_Guard {
-      blocked_by_guard = true
-    }
+  if !rtc_stabilize_due_with_trace(instance, &runtime_ctx, transitions, &result, rtc_max_steps(instance, options), now_ms, &overflow, &transitioned, &blocked_by_guard) {
+    return result
   }
+  rtc_finalize(instance, &result, transitioned, blocked_by_guard)
+  return result
+}
 
-  clear(&instance.internal_event_queue)
-  if len(instance.chart.def.always_transitions) != 0 {
-    if !rtc_process_always_until_stable_with_trace(
-      instance,
-	&runtime_ctx,
-      transitions,
-	&result,
-      max_internal_events,
-	&overflow,
-	&transitioned,
-	&blocked_by_guard,
-    ) {
-      return result
-    }
+rtc_max_steps :: #force_inline proc(instance: ^Instance($State, $Trigger), options: Run_To_Completion_Options) -> int {
+  if options.max_internal_events > 0 {
+    return options.max_internal_events
   }
+  return cap(instance.internal_event_queue)
+}
+
+rtc_finalize :: #force_inline proc(
+  instance: ^Instance($State, $Trigger),
+  result: ^Dispatch_Result(State),
+  transitioned: bool,
+  blocked_by_guard: bool,
+) {
   clear(&instance.internal_event_queue)
   if transitioned {
     result.status = .Transitioned
@@ -831,15 +498,41 @@ dispatch_due_events_with_trace :: proc(
     result.status = .Ignored
   }
   write_configuration_scratch(instance)
-  finalize_dispatch_result(instance, &result)
-  return result
+  finalize_dispatch_result(instance, result)
 }
 
-rtc_process_always_until_stable :: proc(
+rtc_stabilize :: #force_inline proc(
   instance: ^Instance($State, $Trigger),
   runtime_ctx: ^Runtime_Context(Trigger),
   result: ^Dispatch_Result(State),
   max_steps: int,
+  overflow: ^bool,
+  transitioned: ^bool,
+  blocked_by_guard: ^bool,
+) -> bool {
+  return rtc_stabilize_impl(instance, runtime_ctx, result, max_steps, 0, false, overflow, transitioned, blocked_by_guard)
+}
+
+rtc_stabilize_due :: #force_inline proc(
+  instance: ^Instance($State, $Trigger),
+  runtime_ctx: ^Runtime_Context(Trigger),
+  result: ^Dispatch_Result(State),
+  max_steps: int,
+  now_ms: u64,
+  overflow: ^bool,
+  transitioned: ^bool,
+  blocked_by_guard: ^bool,
+) -> bool {
+  return rtc_stabilize_impl(instance, runtime_ctx, result, max_steps, now_ms, true, overflow, transitioned, blocked_by_guard)
+}
+
+rtc_stabilize_impl :: #force_inline proc(
+  instance: ^Instance($State, $Trigger),
+  runtime_ctx: ^Runtime_Context(Trigger),
+  result: ^Dispatch_Result(State),
+  max_steps: int,
+  now_ms: u64,
+  include_due_events: bool,
   overflow: ^bool,
   transitioned: ^bool,
   blocked_by_guard: ^bool,
@@ -862,6 +555,9 @@ rtc_process_always_until_stable :: proc(
       dispatch_event_step(instance, &event_value, runtime_ctx, result)
       if result.status == .Transitioned {
 	raise_completion_events(instance, runtime_ctx, entered_start)
+	if include_due_events {
+	  enqueue_due_events(instance, runtime_ctx, now_ms)
+	}
       }
       if result.status == .Conflict {
 	finalize_dispatch_result(instance, result)
@@ -894,6 +590,9 @@ rtc_process_always_until_stable :: proc(
     if result.status == .Transitioned {
       processed_steps += 1
       raise_completion_events(instance, runtime_ctx, entered_start)
+      if include_due_events {
+	enqueue_due_events(instance, runtime_ctx, now_ms)
+      }
       transitioned^ = true
       continue
     }
@@ -913,12 +612,41 @@ rtc_process_always_until_stable :: proc(
   }
 }
 
-rtc_process_always_until_stable_with_trace :: proc(
+rtc_stabilize_with_trace :: #force_inline proc(
   instance: ^Instance($State, $Trigger),
   runtime_ctx: ^Runtime_Context(Trigger),
   transitions: ^[dynamic]Transition_Step(State),
   result: ^Dispatch_Result(State),
   max_steps: int,
+  overflow: ^bool,
+  transitioned: ^bool,
+  blocked_by_guard: ^bool,
+) -> bool {
+  return rtc_stabilize_with_trace_impl(instance, runtime_ctx, transitions, result, max_steps, 0, false, overflow, transitioned, blocked_by_guard)
+}
+
+rtc_stabilize_due_with_trace :: #force_inline proc(
+  instance: ^Instance($State, $Trigger),
+  runtime_ctx: ^Runtime_Context(Trigger),
+  transitions: ^[dynamic]Transition_Step(State),
+  result: ^Dispatch_Result(State),
+  max_steps: int,
+  now_ms: u64,
+  overflow: ^bool,
+  transitioned: ^bool,
+  blocked_by_guard: ^bool,
+) -> bool {
+  return rtc_stabilize_with_trace_impl(instance, runtime_ctx, transitions, result, max_steps, now_ms, true, overflow, transitioned, blocked_by_guard)
+}
+
+rtc_stabilize_with_trace_impl :: #force_inline proc(
+  instance: ^Instance($State, $Trigger),
+  runtime_ctx: ^Runtime_Context(Trigger),
+  transitions: ^[dynamic]Transition_Step(State),
+  result: ^Dispatch_Result(State),
+  max_steps: int,
+  now_ms: u64,
+  include_due_events: bool,
   overflow: ^bool,
   transitioned: ^bool,
   blocked_by_guard: ^bool,
@@ -941,6 +669,9 @@ rtc_process_always_until_stable_with_trace :: proc(
       dispatch_event_step_with_trace(instance, &event_value, transitions, runtime_ctx, result)
       if result.status == .Transitioned {
 	raise_completion_events(instance, runtime_ctx, entered_start)
+	if include_due_events {
+	  enqueue_due_events(instance, runtime_ctx, now_ms)
+	}
       }
       if result.status == .Conflict {
 	finalize_dispatch_result(instance, result)
@@ -973,6 +704,9 @@ rtc_process_always_until_stable_with_trace :: proc(
     if result.status == .Transitioned {
       processed_steps += 1
       raise_completion_events(instance, runtime_ctx, entered_start)
+      if include_due_events {
+	enqueue_due_events(instance, runtime_ctx, now_ms)
+      }
       transitioned^ = true
       continue
     }

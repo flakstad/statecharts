@@ -702,37 +702,37 @@ Measured on May 24, 2026:
 scratch-buffer dispatch
   iterations/sample: 2000000
   samples:           5
-  best ns/dispatch:  36.05
-  avg ns/dispatch:   36.24
+  best ns/dispatch:  36.63
+  avg ns/dispatch:   36.81
   alloc calls max:   0
   resize calls max:  0
   free calls max:    0
   bytes req max:     0
 
 caller-owned transition trace dispatch
-  best ns/dispatch:  37.26
-  avg ns/dispatch:   37.36
+  best ns/dispatch:  38.54
+  avg ns/dispatch:   41.66
   alloc calls max:   0
 
 run-to-completion dispatch with one raised event
-  best ns/dispatch:  88.91
-  avg ns/dispatch:   90.21
+  best ns/dispatch:  90.97
+  avg ns/dispatch:   95.44
   alloc calls max:   0
 
 due timer dispatch
-  best ns/dispatch:  61.13
-  avg ns/dispatch:   62.25
+  best ns/dispatch:  62.28
+  avg ns/dispatch:   66.35
   alloc calls max:   0
 
 allocating trace/path dispatch
-  best ns/dispatch:  158.46
-  avg ns/dispatch:   159.34
+  best ns/dispatch:  158.19
+  avg ns/dispatch:   159.49
   alloc calls max:   8000000
   bytes req max:     512000000
 
 wide transition lookup dispatch
-  best ns/dispatch:  33.58
-  avg ns/dispatch:   33.79
+  best ns/dispatch:  34.12
+  avg ns/dispatch:   34.45
   alloc calls max:   0
 
 benchmark guard: PASS
@@ -741,7 +741,7 @@ benchmark guard: PASS
 Interpretation:
 
 - The previously recorded delayed-event no-timer regression did not reproduce in this repeated-sample run.
-- Normal dispatch and wide lookup are back in the low-30ns range with no allocation.
+- Normal dispatch and wide lookup remain in the mid-30ns range with no allocation.
 - Due timer dispatch is allocation-free and measures the real `dispatch_due_events` path with one due event per iteration.
 - The transition hot path now reads transition definitions by pointer after source-adjacency lookup, avoiding an unnecessary struct copy before guard evaluation.
 - Conflict endpoint diagnostics are stored on the instance for `last_conflict`, keeping `Dispatch_Result` small on the hot path.
@@ -752,6 +752,7 @@ Interpretation:
 - Complete preemption diagnostics are stored in an instance-owned buffer and remain outside `Dispatch_Result`; guarded dispatch modes remain allocation-free.
 - Startup run-to-completion and due-timer trace variants reuse the existing instance-owned queue and caller-owned trace buffers; focused panic-allocator tests cover their no-allocation behavior.
 - SCXML export is an offline builder API and is not on the dispatch hot path; guarded dispatch benchmarks remain allocation-free after adding it.
+- Typed region definition helpers run before compile and typed region lookup can be collapsed to a cached `Region_Handle`; they do not change dispatch selection.
 - `Always_Def` adds run-to-completion stabilization semantics while keeping ordinary dispatch allocation-free; no-always charts skip the stabilization helper.
 - The benchmark process now exits non-zero if guarded dispatch modes allocate or exceed loose timing limits.
 
