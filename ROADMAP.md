@@ -74,6 +74,7 @@ Implemented:
 - Transition actions can call `raise` during run-to-completion dispatch.
 - Raised internal events use the same active-region broadcast selection as external events.
 - `dispatch_run_to_completion_with_trace` records all transition microsteps in a caller-owned buffer.
+- `Always_Def` provides eventless stabilization transitions for run-to-completion entry points.
 - `Init_Options.internal_event_capacity` lets applications reserve larger RTC queues without dispatch allocation.
 - `Init_Options` exposes reserve knobs for active leaves, dispatch trace buffers, configuration snapshots, paths, and transition scratch buffers.
 - A workflow showcase demonstrates one external event cascading to completion.
@@ -508,6 +509,7 @@ Current status:
 - `dispatch_run_to_completion` passes a `Runtime_Context`; actions can call `user_context(ctx)` to recover the application context.
 - `dispatch_run_to_completion_with_trace` fills a caller-owned transition buffer with every applied microstep.
 - `enter_initial_run_to_completion` passes a `Runtime_Context` to startup entry actions, then processes raised events and completion events until stable.
+- `Always_Def` transitions are processed after queued internal events drain, and repeat until stable or `max_internal_events` is exceeded.
 - Raised internal events broadcast across all active regions and can apply multiple non-conflicting branch transitions in one microstep.
 - Focused tests cover raised events and no-allocation run-to-completion dispatch.
 

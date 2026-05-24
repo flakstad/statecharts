@@ -8,12 +8,14 @@ Guard :: proc(ctx: rawptr, event: rawptr) -> bool
 
 State_Index :: distinct int
 Transition_Index :: distinct int
+Always_Index :: distinct int
 Region_Index :: distinct int
 History_Index :: distinct int
 Region_Handle :: distinct int
 
 INVALID_STATE_INDEX :: State_Index(-1)
 INVALID_TRANSITION_INDEX :: Transition_Index(-1)
+INVALID_ALWAYS_INDEX :: Always_Index(-1)
 INVALID_REGION_INDEX :: Region_Index(-1)
 INVALID_HISTORY_INDEX :: History_Index(-1)
 INVALID_REGION_HANDLE :: Region_Handle(-1)
@@ -79,6 +81,15 @@ Transition_Def :: struct($State, $Trigger: typeid) {
 	action: Action,
 }
 
+Always_Def :: struct($State: typeid) {
+	source: State,
+	target: State,
+
+	kind: Transition_Kind,
+	guard: Guard,
+	action: Action,
+}
+
 Done_Def :: struct($State, $Trigger: typeid) {
 	state: State,
 	trigger: Trigger,
@@ -113,6 +124,7 @@ Chart_Def :: struct($State, $Trigger: typeid) {
 	initials: []Initial_Def(State),
 	histories: []History_Def(State),
 	transitions: []Transition_Def(State, Trigger),
+	always_transitions: []Always_Def(State),
 	done_events: []Done_Def(State, Trigger),
 	after_events: []After_Def(State, Trigger),
 }
@@ -187,6 +199,11 @@ Chart :: struct($State, $Trigger: typeid) {
 	transition_source_indices: [dynamic]State_Index,
 	transition_target_indices: [dynamic]State_Index,
 	transition_target_history_indices: [dynamic]History_Index,
+	always_transition_ranges: [dynamic]Transition_Range,
+	always_transition_indices: [dynamic]Always_Index,
+	always_transition_source_indices: [dynamic]State_Index,
+	always_transition_target_indices: [dynamic]State_Index,
+	always_transition_target_history_indices: [dynamic]History_Index,
 }
 
 Compile_Options :: struct {
@@ -248,6 +265,10 @@ Validation_Error_Kind :: enum {
 	Missing_Transition_Source,
 	Missing_Transition_Target,
 	Internal_Transition_Target_Not_Source,
+	Missing_Always_Source,
+	Missing_Always_Target,
+	Internal_Always_Target_Not_Source,
+	Duplicate_Always,
 	Missing_Done_State,
 	Done_State_Not_Completable,
 	Duplicate_Done,
@@ -321,10 +342,23 @@ Enabled_Transition :: struct {
 	transition_index: Transition_Index,
 }
 
+Enabled_Always_Transition :: struct {
+	found: bool,
+	blocked_by_guard: bool,
+	leaf_index: State_Index,
+	transition_index: Always_Index,
+}
+
 Transition_Conflict :: struct {
 	found: bool,
 	first: Transition_Index,
 	second: Transition_Index,
+}
+
+Always_Transition_Conflict :: struct {
+	found: bool,
+	first: Always_Index,
+	second: Always_Index,
 }
 
 Preemption_Record :: struct {
@@ -403,6 +437,26 @@ destroy_chart :: proc(chart: ^Chart($State, $Trigger)) {
 	if chart.transition_target_history_indices != nil {
 		delete(chart.transition_target_history_indices)
 		chart.transition_target_history_indices = nil
+	}
+	if chart.always_transition_ranges != nil {
+		delete(chart.always_transition_ranges)
+		chart.always_transition_ranges = nil
+	}
+	if chart.always_transition_indices != nil {
+		delete(chart.always_transition_indices)
+		chart.always_transition_indices = nil
+	}
+	if chart.always_transition_source_indices != nil {
+		delete(chart.always_transition_source_indices)
+		chart.always_transition_source_indices = nil
+	}
+	if chart.always_transition_target_indices != nil {
+		delete(chart.always_transition_target_indices)
+		chart.always_transition_target_indices = nil
+	}
+	if chart.always_transition_target_history_indices != nil {
+		delete(chart.always_transition_target_history_indices)
+		chart.always_transition_target_history_indices = nil
 	}
 }
 
@@ -491,6 +545,11 @@ compile :: proc(out: ^Chart($State, $Trigger), def: Chart_Def(State, Trigger), o
 	out.transition_source_indices = make([dynamic]State_Index, 0, len(def.transitions))
 	out.transition_target_indices = make([dynamic]State_Index, 0, len(def.transitions))
 	out.transition_target_history_indices = make([dynamic]History_Index, 0, len(def.transitions))
+	out.always_transition_ranges = make([dynamic]Transition_Range, 0, len(def.states))
+	out.always_transition_indices = make([dynamic]Always_Index, 0, len(def.always_transitions))
+	out.always_transition_source_indices = make([dynamic]State_Index, 0, len(def.always_transitions))
+	out.always_transition_target_indices = make([dynamic]State_Index, 0, len(def.always_transitions))
+	out.always_transition_target_history_indices = make([dynamic]History_Index, 0, len(def.always_transitions))
 
 	for _ in def.states {
 		append(&out.parent_index, INVALID_STATE_INDEX)
@@ -500,6 +559,7 @@ compile :: proc(out: ^Chart($State, $Trigger), def: Chart_Def(State, Trigger), o
 		append(&out.state_owned_region_ranges, Region_Range{})
 		append(&out.transition_ranges, Transition_Range{})
 		append(&out.transition_trigger_group_ranges, Transition_Range{})
+		append(&out.always_transition_ranges, Transition_Range{})
 	}
 	for _ in def.transitions {
 		append(&out.transition_indices, INVALID_TRANSITION_INDEX)
@@ -507,6 +567,12 @@ compile :: proc(out: ^Chart($State, $Trigger), def: Chart_Def(State, Trigger), o
 		append(&out.transition_source_indices, INVALID_STATE_INDEX)
 		append(&out.transition_target_indices, INVALID_STATE_INDEX)
 		append(&out.transition_target_history_indices, INVALID_HISTORY_INDEX)
+	}
+	for _ in def.always_transitions {
+		append(&out.always_transition_indices, INVALID_ALWAYS_INDEX)
+		append(&out.always_transition_source_indices, INVALID_STATE_INDEX)
+		append(&out.always_transition_target_indices, INVALID_STATE_INDEX)
+		append(&out.always_transition_target_history_indices, INVALID_HISTORY_INDEX)
 	}
 
 	result := Compile_Result{errors = make([dynamic]Validation_Error)}
@@ -612,6 +678,32 @@ compile :: proc(out: ^Chart($State, $Trigger), def: Chart_Def(State, Trigger), o
 		}
 	}
 
+	for transition, i in def.always_transitions {
+		source_idx := state_index(out, transition.source)
+		target_idx := state_index(out, transition.target)
+		history_idx := history_index(out, transition.target)
+		if source_idx == INVALID_STATE_INDEX {
+			add_error(&result, .Missing_Always_Source, initial_index = i)
+		} else {
+			out.always_transition_source_indices[i] = source_idx
+			if effective_state_kind(out, source_idx) == .Final {
+				add_error(&result, .Final_State_Has_Outgoing_Transition, initial_index = i)
+			}
+		}
+		if target_idx == INVALID_STATE_INDEX && history_idx == INVALID_HISTORY_INDEX {
+			add_error(&result, .Missing_Always_Target, initial_index = i)
+		} else if history_idx != INVALID_HISTORY_INDEX {
+			out.always_transition_target_history_indices[i] = history_idx
+		} else {
+			out.always_transition_target_indices[i] = target_idx
+		}
+		if source_idx != INVALID_STATE_INDEX &&
+		   transition.kind == .Internal &&
+		   target_idx != source_idx {
+			add_error(&result, .Internal_Always_Target_Not_Source, initial_index = i)
+		}
+	}
+
 	for done, i in def.done_events {
 		done_idx := state_index(out, done.state)
 		if done_idx == INVALID_STATE_INDEX {
@@ -655,10 +747,18 @@ compile :: proc(out: ^Chart($State, $Trigger), def: Chart_Def(State, Trigger), o
 				}
 			}
 		}
+		for i in 0 ..< len(def.always_transitions) {
+			for j in i + 1 ..< len(def.always_transitions) {
+				if def.always_transitions[i].source == def.always_transitions[j].source {
+					add_error(&result, .Duplicate_Always, initial_index = j)
+				}
+			}
+		}
 	}
 
 	build_transition_adjacency(out)
 	build_transition_trigger_adjacency(out)
+	build_always_transition_adjacency(out)
 	build_regions(out)
 	build_histories(out)
 
@@ -871,7 +971,7 @@ init :: proc(
 	instance.history_indices = make([dynamic]State_Index, 0, state_count)
 	instance.deep_history_indices = make([dynamic]State_Index, 0, state_count)
 	instance.deep_history_region_indices = make([dynamic]State_Index, 0, len(chart.regions))
-	internal_event_capacity := len(chart.def.transitions)
+	internal_event_capacity := len(chart.def.transitions) + len(chart.def.always_transitions)
 	if internal_event_capacity < state_count {
 		internal_event_capacity = state_count
 	}
@@ -1039,6 +1139,20 @@ enter_initial_run_to_completion :: proc(
 	}
 
 	clear(&instance.internal_event_queue)
+	if len(instance.chart.def.always_transitions) != 0 {
+		if !rtc_process_always_until_stable(
+			instance,
+			&runtime_ctx,
+			&result,
+			max_internal_events,
+			&overflow,
+			&transitioned,
+			&blocked_by_guard,
+		) {
+			return result
+		}
+	}
+	clear(&instance.internal_event_queue)
 	if transitioned {
 		result.status = .Transitioned
 	} else if blocked_by_guard {
@@ -1140,6 +1254,21 @@ enter_initial_run_to_completion_with_trace :: proc(
 		}
 	}
 
+	clear(&instance.internal_event_queue)
+	if len(instance.chart.def.always_transitions) != 0 {
+		if !rtc_process_always_until_stable_with_trace(
+			instance,
+			&runtime_ctx,
+			transitions,
+			&result,
+			max_internal_events,
+			&overflow,
+			&transitioned,
+			&blocked_by_guard,
+		) {
+			return result
+		}
+	}
 	clear(&instance.internal_event_queue)
 	if transitioned {
 		result.status = .Transitioned
@@ -1278,6 +1407,20 @@ dispatch_run_to_completion :: proc(
 	}
 
 	clear(&instance.internal_event_queue)
+	if len(instance.chart.def.always_transitions) != 0 {
+		if !rtc_process_always_until_stable(
+			instance,
+			&runtime_ctx,
+			&result,
+			max_internal_events,
+			&overflow,
+			&transitioned,
+			&blocked_by_guard,
+		) {
+			return result
+		}
+	}
+	clear(&instance.internal_event_queue)
 	if transitioned {
 		result.status = .Transitioned
 	} else if blocked_by_guard {
@@ -1378,6 +1521,21 @@ dispatch_run_to_completion_with_trace :: proc(
 	}
 
 	clear(&instance.internal_event_queue)
+	if len(instance.chart.def.always_transitions) != 0 {
+		if !rtc_process_always_until_stable_with_trace(
+			instance,
+			&runtime_ctx,
+			transitions,
+			&result,
+			max_internal_events,
+			&overflow,
+			&transitioned,
+			&blocked_by_guard,
+		) {
+			return result
+		}
+	}
+	clear(&instance.internal_event_queue)
 	if transitioned {
 		result.status = .Transitioned
 	} else if blocked_by_guard {
@@ -1441,7 +1599,7 @@ dispatch_due_events :: proc(
 		finalize_dispatch_result(instance, &result)
 		return result
 	}
-	if len(instance.internal_event_queue) == 0 {
+	if len(instance.internal_event_queue) == 0 && len(instance.chart.def.always_transitions) == 0 {
 		result.status = .Ignored
 		write_configuration_scratch(instance)
 		finalize_dispatch_result(instance, &result)
@@ -1491,6 +1649,20 @@ dispatch_due_events :: proc(
 	}
 
 	clear(&instance.internal_event_queue)
+	if len(instance.chart.def.always_transitions) != 0 {
+		if !rtc_process_always_until_stable(
+			instance,
+			&runtime_ctx,
+			&result,
+			max_internal_events,
+			&overflow,
+			&transitioned,
+			&blocked_by_guard,
+		) {
+			return result
+		}
+	}
+	clear(&instance.internal_event_queue)
 	if transitioned {
 		result.status = .Transitioned
 	} else if blocked_by_guard {
@@ -1533,7 +1705,7 @@ dispatch_due_events_with_trace :: proc(
 		finalize_dispatch_result(instance, &result)
 		return result
 	}
-	if len(instance.internal_event_queue) == 0 {
+	if len(instance.internal_event_queue) == 0 && len(instance.chart.def.always_transitions) == 0 {
 		result.status = .Ignored
 		write_configuration_scratch(instance)
 		finalize_dispatch_result(instance, &result)
@@ -1583,6 +1755,21 @@ dispatch_due_events_with_trace :: proc(
 	}
 
 	clear(&instance.internal_event_queue)
+	if len(instance.chart.def.always_transitions) != 0 {
+		if !rtc_process_always_until_stable_with_trace(
+			instance,
+			&runtime_ctx,
+			transitions,
+			&result,
+			max_internal_events,
+			&overflow,
+			&transitioned,
+			&blocked_by_guard,
+		) {
+			return result
+		}
+	}
+	clear(&instance.internal_event_queue)
 	if transitioned {
 		result.status = .Transitioned
 	} else if blocked_by_guard {
@@ -1593,6 +1780,163 @@ dispatch_due_events_with_trace :: proc(
 	write_configuration_scratch(instance)
 	finalize_dispatch_result(instance, &result)
 	return result
+}
+
+rtc_process_always_until_stable :: proc(
+	instance: ^Instance($State, $Trigger),
+	runtime_ctx: ^Runtime_Context(Trigger),
+	result: ^Dispatch_Result(State),
+	max_steps: int,
+	overflow: ^bool,
+	transitioned: ^bool,
+	blocked_by_guard: ^bool,
+) -> bool {
+	processed_steps := 0
+	read_index := 0
+	for {
+		if read_index < len(instance.internal_event_queue) {
+			if processed_steps >= max_steps {
+				result.status = .Error
+				finalize_dispatch_result(instance, result)
+				return false
+			}
+
+			event_value := instance.internal_event_queue[read_index]
+			read_index += 1
+			processed_steps += 1
+
+			entered_start := len(instance.entered_scratch)
+			dispatch_event_step(instance, &event_value, runtime_ctx, result)
+			if result.status == .Transitioned {
+				raise_completion_events(instance, runtime_ctx, entered_start)
+			}
+			if result.status == .Conflict {
+				finalize_dispatch_result(instance, result)
+				return false
+			}
+			if result.status == .Error || overflow^ {
+				result.status = .Error
+				finalize_dispatch_result(instance, result)
+				return false
+			}
+			if result.status == .Transitioned {
+				transitioned^ = true
+			} else if result.status == .Blocked_By_Guard {
+				blocked_by_guard^ = true
+			}
+			continue
+		}
+
+		if len(instance.chart.def.always_transitions) == 0 {
+			return true
+		}
+		if processed_steps >= max_steps {
+			result.status = .Error
+			finalize_dispatch_result(instance, result)
+			return false
+		}
+
+		entered_start := len(instance.entered_scratch)
+		dispatch_always_step(instance, runtime_ctx, result)
+		if result.status == .Transitioned {
+			processed_steps += 1
+			raise_completion_events(instance, runtime_ctx, entered_start)
+			transitioned^ = true
+			continue
+		}
+		if result.status == .Conflict {
+			finalize_dispatch_result(instance, result)
+			return false
+		}
+		if result.status == .Error || overflow^ {
+			result.status = .Error
+			finalize_dispatch_result(instance, result)
+			return false
+		}
+		if result.status == .Blocked_By_Guard {
+			blocked_by_guard^ = true
+		}
+		return true
+	}
+}
+
+rtc_process_always_until_stable_with_trace :: proc(
+	instance: ^Instance($State, $Trigger),
+	runtime_ctx: ^Runtime_Context(Trigger),
+	transitions: ^[dynamic]Transition_Step(State),
+	result: ^Dispatch_Result(State),
+	max_steps: int,
+	overflow: ^bool,
+	transitioned: ^bool,
+	blocked_by_guard: ^bool,
+) -> bool {
+	processed_steps := 0
+	read_index := 0
+	for {
+		if read_index < len(instance.internal_event_queue) {
+			if processed_steps >= max_steps {
+				result.status = .Error
+				finalize_dispatch_result(instance, result)
+				return false
+			}
+
+			event_value := instance.internal_event_queue[read_index]
+			read_index += 1
+			processed_steps += 1
+
+			entered_start := len(instance.entered_scratch)
+			dispatch_event_step_with_trace(instance, &event_value, transitions, runtime_ctx, result)
+			if result.status == .Transitioned {
+				raise_completion_events(instance, runtime_ctx, entered_start)
+			}
+			if result.status == .Conflict {
+				finalize_dispatch_result(instance, result)
+				return false
+			}
+			if result.status == .Error || overflow^ {
+				result.status = .Error
+				finalize_dispatch_result(instance, result)
+				return false
+			}
+			if result.status == .Transitioned {
+				transitioned^ = true
+			} else if result.status == .Blocked_By_Guard {
+				blocked_by_guard^ = true
+			}
+			continue
+		}
+
+		if len(instance.chart.def.always_transitions) == 0 {
+			return true
+		}
+		if processed_steps >= max_steps {
+			result.status = .Error
+			finalize_dispatch_result(instance, result)
+			return false
+		}
+
+		entered_start := len(instance.entered_scratch)
+		dispatch_always_step_with_trace(instance, transitions, runtime_ctx, result)
+		if result.status == .Transitioned {
+			processed_steps += 1
+			raise_completion_events(instance, runtime_ctx, entered_start)
+			transitioned^ = true
+			continue
+		}
+		if result.status == .Conflict {
+			finalize_dispatch_result(instance, result)
+			return false
+		}
+		if result.status == .Error || overflow^ {
+			result.status = .Error
+			finalize_dispatch_result(instance, result)
+			return false
+		}
+		if result.status == .Blocked_By_Guard {
+			blocked_by_guard^ = true
+		}
+		return true
+	}
 }
 
 dispatch_event_step :: proc(
@@ -1687,6 +2031,106 @@ dispatch_with_trace :: proc(
 	return result
 }
 
+dispatch_always_step :: proc(
+	instance: ^Instance($State, $Trigger),
+	ctx: rawptr,
+	result: ^Dispatch_Result(State),
+) {
+	if instance.chart == nil || len(instance.active_leaf_indices) == 0 {
+		result.status = .Error
+		finalize_dispatch_result(instance, result)
+		return
+	}
+	if len(instance.chart.def.always_transitions) == 0 {
+		result.status = .Ignored
+		write_configuration_scratch(instance)
+		finalize_dispatch_result(instance, result)
+		return
+	}
+
+	blocked_by_guard, conflict := collect_enabled_always_transitions(instance, ctx)
+	if conflict.found {
+		result.status = .Conflict
+		write_configuration_scratch(instance)
+		finalize_dispatch_result(instance, result)
+		return
+	}
+	if len(instance.enabled_transition_scratch) > 0 {
+		for enabled in instance.enabled_transition_scratch {
+			transition_idx := Always_Index(enabled.transition_index)
+			transition := instance.chart.def.always_transitions[transition_idx]
+			apply_always_transition_step(instance, transition, transition_idx, enabled.leaf_index, ctx, result)
+			if result.status == .Error {
+				finalize_dispatch_result(instance, result)
+				return
+			}
+		}
+		result.status = .Transitioned
+		write_configuration_scratch(instance)
+		finalize_dispatch_result(instance, result)
+		return
+	}
+
+	if blocked_by_guard {
+		result.status = .Blocked_By_Guard
+	} else {
+		result.status = .Ignored
+	}
+	write_configuration_scratch(instance)
+	finalize_dispatch_result(instance, result)
+}
+
+dispatch_always_step_with_trace :: proc(
+	instance: ^Instance($State, $Trigger),
+	transitions: ^[dynamic]Transition_Step(State),
+	ctx: rawptr,
+	result: ^Dispatch_Result(State),
+) {
+	if instance.chart == nil || len(instance.active_leaf_indices) == 0 {
+		result.status = .Error
+		finalize_dispatch_result(instance, result)
+		return
+	}
+	if len(instance.chart.def.always_transitions) == 0 {
+		result.status = .Ignored
+		write_configuration_scratch(instance)
+		finalize_dispatch_result(instance, result)
+		return
+	}
+
+	blocked_by_guard, conflict := collect_enabled_always_transitions(instance, ctx)
+	if conflict.found {
+		result.status = .Conflict
+		write_configuration_scratch(instance)
+		finalize_dispatch_result(instance, result)
+		return
+	}
+	if len(instance.enabled_transition_scratch) > 0 {
+		for enabled in instance.enabled_transition_scratch {
+			transition_idx := Always_Index(enabled.transition_index)
+			transition := instance.chart.def.always_transitions[transition_idx]
+			apply_always_transition_step(instance, transition, transition_idx, enabled.leaf_index, ctx, result)
+			if result.status == .Error {
+				finalize_dispatch_result(instance, result)
+				return
+			}
+			append_always_transition_trace(transitions, transition)
+		}
+		result.status = .Transitioned
+		write_configuration_scratch(instance)
+		finalize_dispatch_result(instance, result)
+		return
+	}
+
+	if blocked_by_guard {
+		result.status = .Blocked_By_Guard
+	} else {
+		result.status = .Ignored
+	}
+	write_configuration_scratch(instance)
+	finalize_dispatch_result(instance, result)
+}
+
 dispatch_multi_leaf :: proc(
 	instance: ^Instance($State, $Trigger),
 	event: ^Event(Trigger),
@@ -1766,6 +2210,13 @@ dispatch_multi_leaf_with_trace :: proc(
 }
 
 append_transition_trace :: proc(out: ^[dynamic]Transition_Step($State), transition: Transition_Def(State, $Trigger)) {
+	append(out, Transition_Step(State){
+		source = transition.source,
+		target = transition.target,
+	})
+}
+
+append_always_transition_trace :: proc(out: ^[dynamic]Transition_Step($State), transition: Always_Def(State)) {
 	append(out, Transition_Step(State){
 		source = transition.source,
 		target = transition.target,
@@ -1959,6 +2410,29 @@ write_dot :: proc(chart: ^Chart($State, $Trigger), out: ^strings.Builder) -> boo
 		strings.write_string(out, "\"];\n")
 	}
 
+	for transition, i in chart.def.always_transitions {
+		source_idx := chart.always_transition_source_indices[i]
+		target_idx := chart.always_transition_target_indices[i]
+		history_idx := chart.always_transition_target_history_indices[i]
+		if source_idx == INVALID_STATE_INDEX {
+			continue
+		}
+		if target_idx != INVALID_STATE_INDEX {
+			fmt.sbprintf(out, "  S%d -> S%d [label=\"always", int(source_idx), int(target_idx))
+		} else if history_idx != INVALID_HISTORY_INDEX {
+			fmt.sbprintf(out, "  S%d -> H%d [label=\"always", int(source_idx), int(history_idx))
+		} else {
+			continue
+		}
+
+		if transition.kind == .Internal {
+			strings.write_string(out, " / internal")
+		} else if transition.kind == .Local {
+			strings.write_string(out, " / local")
+		}
+		strings.write_string(out, "\"];\n")
+	}
+
 	for history, i in chart.histories {
 		fmt.sbprintf(out, "  H%d [shape=circle, label=\"", i)
 		dot_write_value(out, history.id)
@@ -2038,7 +2512,7 @@ scxml_write_state :: proc(
 	}
 
 	has_children := state_has_child(chart, state_idx)
-	has_transitions := chart.transition_ranges[state_idx].count > 0
+	has_transitions := chart.transition_ranges[state_idx].count > 0 || chart.always_transition_ranges[state_idx].count > 0
 	has_histories := scxml_state_has_histories(chart, state_idx)
 
 	scxml_write_indent(out, indent)
@@ -2156,6 +2630,32 @@ scxml_write_transitions_for_state :: proc(
 		strings.write_string(out, "<transition event=\"")
 		xml_write_value(out, transition.trigger)
 		strings.write_string(out, "\" target=\"")
+		if target_idx != INVALID_STATE_INDEX {
+			xml_write_value(out, chart.def.states[target_idx].id)
+		} else {
+			xml_write_value(out, chart.histories[history_idx].id)
+		}
+		strings.write_string(out, "\"")
+		if transition.kind == .Internal {
+			strings.write_string(out, " type=\"internal\"")
+		}
+		strings.write_string(out, "/>\n")
+	}
+
+	always_range := chart.always_transition_ranges[state_idx]
+	for offset in 0 ..< always_range.count {
+		transition_idx := chart.always_transition_indices[always_range.start + offset]
+		if transition_idx == INVALID_ALWAYS_INDEX do continue
+
+		transition := chart.def.always_transitions[transition_idx]
+		target_idx := chart.always_transition_target_indices[transition_idx]
+		history_idx := chart.always_transition_target_history_indices[transition_idx]
+		if target_idx == INVALID_STATE_INDEX && history_idx == INVALID_HISTORY_INDEX {
+			continue
+		}
+
+		scxml_write_indent(out, indent)
+		strings.write_string(out, "<transition target=\"")
 		if target_idx != INVALID_STATE_INDEX {
 			xml_write_value(out, chart.def.states[target_idx].id)
 		} else {
@@ -2786,6 +3286,15 @@ write_validation_index_detail :: proc(
 ) {
 	index := error.initial_index
 	#partial switch error.kind {
+	case .Missing_Always_Source, .Missing_Always_Target, .Internal_Always_Target_Not_Source, .Duplicate_Always:
+		fmt.sbprintf(out, " always[%d]", index)
+		if index < len(def.always_transitions) {
+			transition := def.always_transitions[index]
+			strings.write_string(out, " ")
+			write_plain_value(out, transition.source)
+			strings.write_string(out, " --> ")
+			write_plain_value(out, transition.target)
+		}
 	case .Missing_Done_State, .Done_State_Not_Completable, .Duplicate_Done:
 		fmt.sbprintf(out, " done[%d]", index)
 		if index < len(def.done_events) {
@@ -2871,6 +3380,14 @@ validation_error_kind_text :: proc(kind: Validation_Error_Kind) -> string {
 		return "missing transition target"
 	case .Internal_Transition_Target_Not_Source:
 		return "internal transition target is not source"
+	case .Missing_Always_Source:
+		return "missing always transition source"
+	case .Missing_Always_Target:
+		return "missing always transition target"
+	case .Internal_Always_Target_Not_Source:
+		return "internal always transition target is not source"
+	case .Duplicate_Always:
+		return "duplicate always transition"
 	case .Missing_Done_State:
 		return "missing done state"
 	case .Done_State_Not_Completable:
@@ -2981,6 +3498,34 @@ collect_enabled_transitions :: proc(
 	return blocked_by_guard, conflict
 }
 
+collect_enabled_always_transitions :: proc(
+	instance: ^Instance($State, $Trigger),
+	ctx: rawptr,
+) -> (bool, Always_Transition_Conflict) {
+	clear(&instance.candidate_transition_scratch)
+	clear(&instance.enabled_transition_scratch)
+	blocked_by_guard := false
+
+	for leaf_idx in instance.active_leaf_indices {
+		enabled := find_enabled_always_transition_from_leaf(instance, leaf_idx, ctx)
+		if enabled.blocked_by_guard {
+			blocked_by_guard = true
+		}
+		if !enabled.found {
+			continue
+		}
+
+		append(&instance.candidate_transition_scratch, Enabled_Transition{
+			found = true,
+			leaf_index = enabled.leaf_index,
+			transition_index = Transition_Index(enabled.transition_index),
+		})
+	}
+
+	conflict := select_enabled_always_transitions(instance)
+	return blocked_by_guard, conflict
+}
+
 select_enabled_transitions :: proc(instance: ^Instance($State, $Trigger)) -> Transition_Conflict {
 	for candidate in instance.candidate_transition_scratch {
 		candidate_source_idx := instance.chart.transition_source_indices[candidate.transition_index]
@@ -3027,6 +3572,54 @@ select_enabled_transitions :: proc(instance: ^Instance($State, $Trigger)) -> Tra
 		}
 	}
 	return Transition_Conflict{}
+}
+
+select_enabled_always_transitions :: proc(instance: ^Instance($State, $Trigger)) -> Always_Transition_Conflict {
+	for candidate in instance.candidate_transition_scratch {
+		candidate_idx := Always_Index(candidate.transition_index)
+		candidate_source_idx := instance.chart.always_transition_source_indices[candidate_idx]
+		candidate_exit_root_idx := always_transition_exit_root(instance.chart, candidate_idx)
+
+		should_select := true
+		for i := len(instance.enabled_transition_scratch) - 1; i >= 0; i -= 1 {
+			selected := instance.enabled_transition_scratch[i]
+			selected_idx := Always_Index(selected.transition_index)
+			selected_source_idx := instance.chart.always_transition_source_indices[selected_idx]
+			selected_exit_root_idx := always_transition_exit_root(instance.chart, selected_idx)
+
+			if !exit_roots_conflict(instance.chart, candidate_exit_root_idx, selected_exit_root_idx) {
+				continue
+			}
+
+			if candidate_idx == selected_idx {
+				should_select = false
+				break
+			}
+
+			if candidate_source_idx != selected_source_idx &&
+			   state_is_descendant_or_self(instance.chart, candidate_source_idx, selected_source_idx) {
+				ordered_remove(&instance.enabled_transition_scratch, i)
+				continue
+			}
+
+			if selected_source_idx != candidate_source_idx &&
+			   state_is_descendant_or_self(instance.chart, selected_source_idx, candidate_source_idx) {
+				should_select = false
+				break
+			}
+
+			return Always_Transition_Conflict{
+				found = true,
+				first = selected_idx,
+				second = candidate_idx,
+			}
+		}
+
+		if should_select {
+			append(&instance.enabled_transition_scratch, candidate)
+		}
+	}
+	return Always_Transition_Conflict{}
 }
 
 record_preemption :: #force_inline proc(
@@ -3109,6 +3702,41 @@ find_enabled_transition_from_leaf :: #force_inline proc(
 	return result
 }
 
+find_enabled_always_transition_from_leaf :: #force_inline proc(
+	instance: ^Instance($State, $Trigger),
+	leaf_idx: State_Index,
+	ctx: rawptr,
+) -> Enabled_Always_Transition {
+	result := Enabled_Always_Transition{
+		leaf_index = INVALID_STATE_INDEX,
+		transition_index = INVALID_ALWAYS_INDEX,
+	}
+	if leaf_idx == INVALID_STATE_INDEX do return result
+
+	cursor := leaf_idx
+	for cursor != INVALID_STATE_INDEX {
+		transition_range := instance.chart.always_transition_ranges[cursor]
+		for offset in 0 ..< transition_range.count {
+			transition_idx := instance.chart.always_transition_indices[transition_range.start + offset]
+			if transition_idx == INVALID_ALWAYS_INDEX do continue
+
+			transition := &instance.chart.def.always_transitions[transition_idx]
+			if transition.guard != nil && !transition.guard(ctx, nil) {
+				result.blocked_by_guard = true
+				continue
+			}
+
+			result.found = true
+			result.leaf_index = leaf_idx
+			result.transition_index = transition_idx
+			return result
+		}
+		cursor = instance.chart.parent_index[cursor]
+	}
+
+	return result
+}
+
 transition_exit_root :: proc(chart: ^Chart($State, $Trigger), transition_idx: Transition_Index) -> State_Index {
 	source_idx := chart.transition_source_indices[transition_idx]
 	target_idx := transition_target_entry_index(chart, transition_idx)
@@ -3116,6 +3744,16 @@ transition_exit_root :: proc(chart: ^Chart($State, $Trigger), transition_idx: Tr
 		return source_idx
 	}
 	lca_idx := transition_exit_stop_index(chart, transition_idx, target_idx)
+	return highest_exited_state(chart, source_idx, lca_idx)
+}
+
+always_transition_exit_root :: proc(chart: ^Chart($State, $Trigger), transition_idx: Always_Index) -> State_Index {
+	source_idx := chart.always_transition_source_indices[transition_idx]
+	target_idx := always_transition_target_entry_index(chart, transition_idx)
+	if target_idx == INVALID_STATE_INDEX {
+		return source_idx
+	}
+	lca_idx := always_transition_exit_stop_index(chart, transition_idx, target_idx)
 	return highest_exited_state(chart, source_idx, lca_idx)
 }
 
@@ -3129,6 +3767,22 @@ transition_exit_stop_index :: proc(
 	transition := chart.def.transitions[transition_idx]
 	if transition.kind != .Local &&
 	   (chart.transition_target_history_indices[transition_idx] == INVALID_HISTORY_INDEX && source_idx == target_idx ||
+	    source_idx != target_idx && state_is_descendant_or_self(chart, target_idx, source_idx)) {
+		lca_idx = chart.parent_index[source_idx]
+	}
+	return lca_idx
+}
+
+always_transition_exit_stop_index :: proc(
+	chart: ^Chart($State, $Trigger),
+	transition_idx: Always_Index,
+	target_idx: State_Index,
+) -> State_Index {
+	source_idx := chart.always_transition_source_indices[transition_idx]
+	lca_idx := least_common_superstate(chart, source_idx, target_idx)
+	transition := chart.def.always_transitions[transition_idx]
+	if transition.kind != .Local &&
+	   (chart.always_transition_target_history_indices[transition_idx] == INVALID_HISTORY_INDEX && source_idx == target_idx ||
 	    source_idx != target_idx && state_is_descendant_or_self(chart, target_idx, source_idx)) {
 		lca_idx = chart.parent_index[source_idx]
 	}
@@ -3237,6 +3891,40 @@ build_transition_trigger_adjacency :: proc(chart: ^Chart($State, $Trigger)) {
 			chart.transition_trigger_indices[write_idx] = transition_idx
 			write_offsets[group_idx] += 1
 		}
+	}
+}
+
+build_always_transition_adjacency :: proc(chart: ^Chart($State, $Trigger)) {
+	for i in 0 ..< len(chart.always_transition_ranges) {
+		chart.always_transition_ranges[i] = Transition_Range{}
+	}
+	for i in 0 ..< len(chart.always_transition_indices) {
+		chart.always_transition_indices[i] = INVALID_ALWAYS_INDEX
+	}
+
+	for _, transition_index in chart.def.always_transitions {
+		source_idx := chart.always_transition_source_indices[transition_index]
+		if source_idx != INVALID_STATE_INDEX {
+			chart.always_transition_ranges[source_idx].count += 1
+		}
+	}
+
+	start := 0
+	write_offsets := make([dynamic]State_Index, 0, len(chart.def.states))
+	defer delete(write_offsets)
+	for i in 0 ..< len(chart.always_transition_ranges) {
+		chart.always_transition_ranges[i].start = start
+		append(&write_offsets, State_Index(start))
+		start += chart.always_transition_ranges[i].count
+	}
+
+	for _, transition_idx in chart.def.always_transitions {
+		source_idx := chart.always_transition_source_indices[transition_idx]
+		if source_idx == INVALID_STATE_INDEX do continue
+
+		write_idx := write_offsets[source_idx]
+		chart.always_transition_indices[int(write_idx)] = Always_Index(transition_idx)
+		write_offsets[source_idx] += 1
 	}
 }
 
@@ -3468,6 +4156,83 @@ transition_target_entry_index :: proc(chart: ^Chart($State, $Trigger), transitio
 		return chart.histories[history_idx].superstate
 	}
 	return chart.transition_target_indices[transition_idx]
+}
+
+apply_always_transition_step :: #force_inline proc(
+	instance: ^Instance($State, $Trigger),
+	transition: Always_Def(State),
+	transition_idx: Always_Index,
+	source_leaf_idx: State_Index,
+	ctx: rawptr,
+	result: ^Dispatch_Result(State),
+) {
+	result.source = transition.source
+	result.target = transition.target
+
+	if transition.kind == .Internal {
+		if transition.action != nil {
+			transition.action(ctx, nil)
+		}
+		return
+	}
+
+	source_idx := instance.chart.always_transition_source_indices[transition_idx]
+	if len(instance.chart.histories) == 0 {
+		target_idx := instance.chart.always_transition_target_indices[transition_idx]
+		if source_leaf_idx == INVALID_STATE_INDEX ||
+		   source_idx == INVALID_STATE_INDEX ||
+		   target_idx == INVALID_STATE_INDEX {
+			result.status = .Error
+			return
+		}
+
+		lca_idx := always_transition_exit_stop_index(instance.chart, transition_idx, target_idx)
+
+		exit_transition_source(instance, source_idx, source_leaf_idx, lca_idx, ctx, nil, result)
+		if transition.action != nil {
+			transition.action(ctx, nil)
+		}
+		enter_from_index(instance, target_idx, ctx, nil, result, stop_idx = lca_idx)
+		return
+	}
+
+	target_idx := instance.chart.always_transition_target_indices[transition_idx]
+	history_idx := instance.chart.always_transition_target_history_indices[transition_idx]
+	target_entry_idx := always_transition_target_entry_index(instance.chart, transition_idx)
+	resolved_target_idx := target_idx
+	if history_idx != INVALID_HISTORY_INDEX {
+		if history_targets_deep_and(instance.chart, history_idx) {
+			resolved_target_idx = instance.chart.histories[history_idx].superstate
+		} else {
+			resolved_target_idx = resolved_history_target_index(instance, history_idx)
+		}
+	}
+	if source_leaf_idx == INVALID_STATE_INDEX ||
+	   source_idx == INVALID_STATE_INDEX ||
+	   target_entry_idx == INVALID_STATE_INDEX {
+		result.status = .Error
+		return
+	}
+
+	lca_idx := always_transition_exit_stop_index(instance.chart, transition_idx, target_entry_idx)
+
+	exit_transition_source(instance, source_idx, source_leaf_idx, lca_idx, ctx, nil, result)
+	if transition.action != nil {
+		transition.action(ctx, nil)
+	}
+	if history_idx != INVALID_HISTORY_INDEX && history_targets_deep_and(instance.chart, history_idx) {
+		enter_deep_and_history_index(instance, history_idx, ctx, nil, result, stop_idx = lca_idx)
+	} else {
+		enter_from_index(instance, resolved_target_idx, ctx, nil, result, stop_idx = lca_idx)
+	}
+}
+
+always_transition_target_entry_index :: proc(chart: ^Chart($State, $Trigger), transition_idx: Always_Index) -> State_Index {
+	history_idx := chart.always_transition_target_history_indices[transition_idx]
+	if history_idx != INVALID_HISTORY_INDEX {
+		return chart.histories[history_idx].superstate
+	}
+	return chart.always_transition_target_indices[transition_idx]
 }
 
 least_common_superstate :: proc(chart: ^Chart($State, $Trigger), a: State_Index, b: State_Index) -> State_Index {

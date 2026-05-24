@@ -36,8 +36,6 @@ authorize :: proc(ctx: rawptr, event: rawptr) {
 
 capture :: proc(ctx: rawptr, event: rawptr) {
 	log(ctx, "captured")
-	ok := sc.raise(ctx, sc.Event(Workflow_Event){id = .Captured})
-	assert(ok)
 }
 
 states := [?]sc.State_Def(Workflow_State){
@@ -51,8 +49,11 @@ states := [?]sc.State_Def(Workflow_State){
 transitions := [?]sc.Transition_Def(Workflow_State, Workflow_Event){
 	{source = .Draft, target = .Authorizing, trigger = .Submit, action = authorize},
 	{source = .Authorizing, target = .Capturing, trigger = .Authorized, action = capture},
-	{source = .Capturing, target = .Complete, trigger = .Captured},
 	{source = .Authorizing, target = .Failed, trigger = .Declined},
+}
+
+always_transitions := [?]sc.Always_Def(Workflow_State){
+	{source = .Capturing, target = .Complete},
 }
 
 chart_def :: proc() -> sc.Chart_Def(Workflow_State, Workflow_Event) {
@@ -60,6 +61,7 @@ chart_def :: proc() -> sc.Chart_Def(Workflow_State, Workflow_Event) {
 		initial = .Draft,
 		states = states[:],
 		transitions = transitions[:],
+		always_transitions = always_transitions[:],
 	}
 }
 

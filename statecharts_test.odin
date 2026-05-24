@@ -262,6 +262,9 @@ test_write_scxml_exports_states_history_and_transitions :: proc(t: ^testing.T) {
 		{source = .Playing, target = .Paused, trigger = .Pause},
 		{source = .Paused, target = .Playing_History, trigger = .Resume},
 	}
+	always := [?]Always_Def(Test_State){
+		{source = .Playing_Music, target = .Playing_Podcast},
+	}
 	chart_def := Chart_Def(Test_State, Test_Event){
 		initial = .Player,
 		states = states[:],
@@ -269,6 +272,7 @@ test_write_scxml_exports_states_history_and_transitions :: proc(t: ^testing.T) {
 		regions = regions[:],
 		histories = histories[:],
 		transitions = transitions[:],
+		always_transitions = always[:],
 	}
 
 	chart: Chart(Test_State, Test_Event)
@@ -289,6 +293,7 @@ test_write_scxml_exports_states_history_and_transitions :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(scxml, "<history id=\"Playing_History\" type=\"deep\">"))
 	testing.expect(t, strings.contains(scxml, "<transition event=\"Pause\" target=\"Paused\"/>"))
 	testing.expect(t, strings.contains(scxml, "<transition event=\"Resume\" target=\"Playing_History\"/>"))
+	testing.expect(t, strings.contains(scxml, "<transition target=\"Playing_Podcast\"/>"))
 }
 
 @(test)
@@ -2399,6 +2404,181 @@ test_enter_initial_run_to_completion_does_not_allocate_after_init :: proc(t: ^te
 
 	testing.expect_value(t, result.status, Dispatch_Status.Transitioned)
 	testing.expect(t, is_active(&machine, Test_State.Rtc_Complete))
+}
+
+@(test)
+test_enter_initial_run_to_completion_processes_always_transition :: proc(t: ^testing.T) {
+	states := [?]State_Def(Test_State){
+		{id = .Rtc_Idle},
+		{id = .Rtc_Done},
+	}
+	always := [?]Always_Def(Test_State){
+		{source = .Rtc_Idle, target = .Rtc_Done},
+	}
+	chart_def := Chart_Def(Test_State, Test_Event){
+		initial = .Rtc_Idle,
+		states = states[:],
+		always_transitions = always[:],
+	}
+
+	chart: Chart(Test_State, Test_Event)
+	compile_result := compile(&chart, chart_def)
+	defer destroy_compile_result(&compile_result)
+	defer destroy_chart(&chart)
+	testing.expect(t, compile_result.ok)
+
+	machine: Instance(Test_State, Test_Event)
+	testing.expect(t, init(&machine, &chart))
+	defer destroy_instance(&machine)
+
+	trace := make([dynamic]Transition_Step(Test_State), 0, 1)
+	defer delete(trace)
+	result := enter_initial_run_to_completion_with_trace(&machine, &trace)
+	defer destroy_dispatch_result(&result)
+
+	testing.expect_value(t, result.status, Dispatch_Status.Transitioned)
+	testing.expect_value(t, len(trace), 1)
+	testing.expect_value(t, trace[0].source, Test_State.Rtc_Idle)
+	testing.expect_value(t, trace[0].target, Test_State.Rtc_Done)
+	testing.expect(t, is_active(&machine, Test_State.Rtc_Done))
+}
+
+@(test)
+test_run_to_completion_processes_always_transition_after_event :: proc(t: ^testing.T) {
+	states := [?]State_Def(Test_State){
+		{id = .Rtc_Idle},
+		{id = .Rtc_Armed},
+		{id = .Rtc_Done},
+	}
+	transitions := [?]Transition_Def(Test_State, Test_Event){
+		{source = .Rtc_Idle, target = .Rtc_Armed, trigger = .Begin},
+	}
+	always := [?]Always_Def(Test_State){
+		{source = .Rtc_Armed, target = .Rtc_Done},
+	}
+	chart_def := Chart_Def(Test_State, Test_Event){
+		initial = .Rtc_Idle,
+		states = states[:],
+		transitions = transitions[:],
+		always_transitions = always[:],
+	}
+
+	chart: Chart(Test_State, Test_Event)
+	compile_result := compile(&chart, chart_def)
+	defer destroy_compile_result(&compile_result)
+	defer destroy_chart(&chart)
+	testing.expect(t, compile_result.ok)
+
+	machine: Instance(Test_State, Test_Event)
+	testing.expect(t, init(&machine, &chart))
+	defer destroy_instance(&machine)
+
+	result := enter_initial(&machine)
+	destroy_dispatch_result(&result)
+
+	trace := make([dynamic]Transition_Step(Test_State), 0, 2)
+	defer delete(trace)
+	result = dispatch_run_to_completion_with_trace(&machine, Event(Test_Event){id = .Begin}, &trace)
+	defer destroy_dispatch_result(&result)
+
+	testing.expect_value(t, result.status, Dispatch_Status.Transitioned)
+	testing.expect_value(t, len(trace), 2)
+	testing.expect_value(t, trace[0].source, Test_State.Rtc_Idle)
+	testing.expect_value(t, trace[0].target, Test_State.Rtc_Armed)
+	testing.expect_value(t, trace[1].source, Test_State.Rtc_Armed)
+	testing.expect_value(t, trace[1].target, Test_State.Rtc_Done)
+	testing.expect(t, is_active(&machine, Test_State.Rtc_Done))
+}
+
+@(test)
+test_always_transition_does_not_allocate_after_init :: proc(t: ^testing.T) {
+	states := [?]State_Def(Test_State){
+		{id = .Rtc_Idle},
+		{id = .Rtc_Done},
+	}
+	always := [?]Always_Def(Test_State){
+		{source = .Rtc_Idle, target = .Rtc_Done},
+	}
+	chart_def := Chart_Def(Test_State, Test_Event){
+		initial = .Rtc_Idle,
+		states = states[:],
+		always_transitions = always[:],
+	}
+
+	chart: Chart(Test_State, Test_Event)
+	compile_result := compile(&chart, chart_def)
+	defer destroy_compile_result(&compile_result)
+	defer destroy_chart(&chart)
+	testing.expect(t, compile_result.ok)
+
+	machine: Instance(Test_State, Test_Event)
+	testing.expect(t, init(&machine, &chart))
+	defer destroy_instance(&machine)
+
+	old_allocator := context.allocator
+	context.allocator = mem.panic_allocator()
+	result := enter_initial_run_to_completion(&machine)
+	context.allocator = old_allocator
+	defer destroy_dispatch_result(&result)
+
+	testing.expect_value(t, result.status, Dispatch_Status.Transitioned)
+	testing.expect(t, is_active(&machine, Test_State.Rtc_Done))
+}
+
+@(test)
+test_run_to_completion_reports_error_when_always_transition_loop_exceeds_limit :: proc(t: ^testing.T) {
+	states := [?]State_Def(Test_State){
+		{id = .Rtc_Idle},
+	}
+	always := [?]Always_Def(Test_State){
+		{source = .Rtc_Idle, target = .Rtc_Idle},
+	}
+	chart_def := Chart_Def(Test_State, Test_Event){
+		initial = .Rtc_Idle,
+		states = states[:],
+		always_transitions = always[:],
+	}
+
+	chart: Chart(Test_State, Test_Event)
+	compile_result := compile(&chart, chart_def)
+	defer destroy_compile_result(&compile_result)
+	defer destroy_chart(&chart)
+	testing.expect(t, compile_result.ok)
+
+	machine: Instance(Test_State, Test_Event)
+	testing.expect(t, init(&machine, &chart))
+	defer destroy_instance(&machine)
+
+	result := enter_initial_run_to_completion(&machine, nil, Run_To_Completion_Options{max_internal_events = 2})
+	defer destroy_dispatch_result(&result)
+
+	testing.expect_value(t, result.status, Dispatch_Status.Error)
+}
+
+@(test)
+test_compile_rejects_duplicate_always_transitions_by_default :: proc(t: ^testing.T) {
+	states := [?]State_Def(Test_State){
+		{id = .Rtc_Idle},
+		{id = .Rtc_Armed},
+		{id = .Rtc_Done},
+	}
+	always := [?]Always_Def(Test_State){
+		{source = .Rtc_Idle, target = .Rtc_Armed},
+		{source = .Rtc_Idle, target = .Rtc_Done},
+	}
+	chart_def := Chart_Def(Test_State, Test_Event){
+		initial = .Rtc_Idle,
+		states = states[:],
+		always_transitions = always[:],
+	}
+
+	chart: Chart(Test_State, Test_Event)
+	result := compile(&chart, chart_def)
+	defer destroy_compile_result(&result)
+	defer destroy_chart(&chart)
+
+	testing.expect(t, !result.ok)
+	testing.expect(t, has_validation_error(result.errors[:], .Duplicate_Always))
 }
 
 @(test)

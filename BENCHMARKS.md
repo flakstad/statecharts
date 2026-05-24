@@ -703,37 +703,37 @@ Measured on May 24, 2026:
 scratch-buffer dispatch
   iterations/sample: 2000000
   samples:           5
-  best ns/dispatch:  35.58
-  avg ns/dispatch:   35.66
+  best ns/dispatch:  36.15
+  avg ns/dispatch:   36.38
   alloc calls max:   0
   resize calls max:  0
   free calls max:    0
   bytes req max:     0
 
 caller-owned transition trace dispatch
-  best ns/dispatch:  36.74
-  avg ns/dispatch:   36.85
+  best ns/dispatch:  37.23
+  avg ns/dispatch:   37.59
   alloc calls max:   0
 
 run-to-completion dispatch with one raised event
-  best ns/dispatch:  87.69
-  avg ns/dispatch:   88.19
+  best ns/dispatch:  89.56
+  avg ns/dispatch:   89.83
   alloc calls max:   0
 
 due timer dispatch
-  best ns/dispatch:  58.31
-  avg ns/dispatch:   58.66
+  best ns/dispatch:  61.55
+  avg ns/dispatch:   61.89
   alloc calls max:   0
 
 allocating trace/path dispatch
-  best ns/dispatch:  155.41
-  avg ns/dispatch:   155.61
+  best ns/dispatch:  157.38
+  avg ns/dispatch:   158.34
   alloc calls max:   8000000
   bytes req max:     512000000
 
 wide transition lookup dispatch
-  best ns/dispatch:  33.51
-  avg ns/dispatch:   33.69
+  best ns/dispatch:  34.47
+  avg ns/dispatch:   35.10
   alloc calls max:   0
 
 benchmark guard: PASS
@@ -753,6 +753,7 @@ Interpretation:
 - Complete preemption diagnostics are stored in an instance-owned buffer and remain outside `Dispatch_Result`; guarded dispatch modes remain allocation-free.
 - Startup run-to-completion and due-timer trace variants reuse the existing instance-owned queue and caller-owned trace buffers; focused panic-allocator tests cover their no-allocation behavior.
 - SCXML export is an offline builder API and is not on the dispatch hot path; guarded dispatch benchmarks remain allocation-free after adding it.
+- `Always_Def` adds run-to-completion stabilization semantics while keeping ordinary dispatch allocation-free; no-always charts skip the stabilization helper.
 - The benchmark process now exits non-zero if guarded dispatch modes allocate or exceed loose timing limits.
 
 ## Regression Test

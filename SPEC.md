@@ -276,6 +276,8 @@ Initial entry has both simple and run-to-completion forms. `enter_initial` enter
 
 Raised internal events are broadcast through the same active-region selection rules as external events. A raised event can therefore advance multiple orthogonal regions in one RTC microstep when their transitions do not conflict.
 
+Eventless transitions are defined with `Always_Def`. They have source, target, kind, guard, and action fields like ordinary transitions, but no trigger. Run-to-completion APIs process always transitions after the queued raised/done/due events have drained, and repeat until the chart is stable or `max_internal_events` is exceeded. Ordinary `dispatch` does not process always transitions.
+
 `Final` states are atomic completion markers. `is_complete` reports whether a state's active regions have all reached final leaves. `Done_Def` maps a completed state to a typed event; during run-to-completion dispatch, entering a final state can raise that completion event automatically.
 
 Delayed events are defined with `After_Def`. Entering `state` arms the timer at `now_ms + delay_ms`, exiting that state cancels it, and `dispatch_due_events(instance, now_ms, ...)` processes due timers through the same internal event queue used by run-to-completion dispatch. `next_due_event_ms(instance)` returns the earliest active due time for app schedulers. The application owns the clock and supplies `now_ms`; the package does not sleep or read wall-clock time.
@@ -305,6 +307,7 @@ Chart_Def :: struct($State, $Trigger: typeid) {
 	initials: []Initial_Def(State),
 	histories: []History_Def(State),
 	transitions: []Transition_Def(State, Trigger),
+	always_transitions: []Always_Def(State),
 	done_events: []Done_Def(State, Trigger),
 	after_events: []After_Def(State, Trigger),
 }
@@ -355,6 +358,15 @@ Transition_Def :: struct($State, $Trigger: typeid) {
 	source: State,
 	target: State,
 	trigger: Trigger,
+
+	kind: Transition_Kind,
+	guard: Guard,
+	action: Action,
+}
+
+Always_Def :: struct($State: typeid) {
+	source: State,
+	target: State,
 
 	kind: Transition_Kind,
 	guard: Guard,
@@ -804,6 +816,7 @@ Compilation should validate:
 - No superstate cycles exist.
 - Every transition source exists.
 - Every transition target exists, unless the transition kind explicitly permits no target.
+- Every always transition source and target exists.
 - Every state that appears as a superstate has exactly one initial substate.
 - No state that lacks substates appears in the initial-substate table.
 - No state appears as a substate of more than one superstate.
@@ -812,9 +825,11 @@ Compilation should validate:
 - Duplicate done events for the same state/trigger are rejected.
 - Duplicate after events for the same state/delay/trigger are rejected.
 - Internal transitions target their source state.
+- Internal always transitions target their source state.
 - Duplicate transitions with the same source and trigger are rejected by default.
+- Duplicate always transitions with the same source are rejected by default.
 
-If `Compile_Options.allow_ambiguous_transitions` is true, duplicate source/trigger transitions are accepted and declaration order is priority order.
+If `Compile_Options.allow_ambiguous_transitions` is true, duplicate source/trigger transitions and duplicate always transitions from the same source are accepted and declaration order is priority order.
 
 ## Future Features
 
