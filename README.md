@@ -2,61 +2,21 @@
 
 Deterministic Harel-style statecharts for Odin.
 
-The package uses application-defined enum types for states and events, validates chart definitions up front, compiles them into dense runtime tables, and keeps dispatch allocation-free after initialization.
+Use it for state machines that need nested states, orthogonal regions, history,
+delayed events, run-to-completion, snapshots, or exportable diagrams.
 
-## Features
+Charts are defined with typed tables, compiled once, and then dispatched at
+runtime. After initialization, normal dispatch does not allocate.
 
-- Hierarchical states
-- Orthogonal regions
-- External, local, and internal transitions
-- Guards, transition actions, entry actions, and exit actions
-- Shallow and deep history
-- Run-to-completion event raising
-- Eventless `Always_Def` transitions
-- Final states and typed done events
-- Delayed events with application-owned time
-- Active-state, history, and timer snapshot/restore helpers
-- DOT and SCXML export
-
-## Authoring API
-
-The `*_Def` structs are still the engine data model. For hand-written charts,
-the package also provides small constructors:
-
-```odin
-sc.on(Door_State.Closed, Door_Event.Open, Door_State.Open)
-sc.internal(Door_State.Open, Door_Event.Close, close_action)
-sc.after(Door_State.Open, 500, Door_Event.Close)
-sc.define(Door_State.Closed, states[:], transitions[:])
-```
-
-Use `define_full` when a chart needs substates, regions, history, always
-transitions, done events, or delayed events.
-
-## Layout
-
-- `statecharts/`: library package
-- `showcases/`: runnable examples
-- `SPEC.md`: API and semantics notes
-- `ROADMAP.md`: current status and design notes
-- `BENCHMARKS.md`: benchmark results and guard notes
-
-## Minimal Example
+## Example
 
 ```odin
 package main
 
 import sc "local:statecharts"
 
-Door_State :: enum {
-  Closed,
-  Open,
-}
-
-Door_Event :: enum {
-  Open,
-  Close,
-}
+Door_State :: enum {Closed, Open}
+Door_Event :: enum {Open, Close}
 
 states := [?]sc.State_Def(Door_State){
   {id = .Closed},
@@ -70,55 +30,79 @@ transitions := [?]sc.Transition_Def(Door_State, Door_Event){
 
 main :: proc() {
   chart: sc.Chart(Door_State, Door_Event)
-  chart_def := sc.define(Door_State.Closed, states[:], transitions[:])
-  result := sc.compile(&chart, chart_def)
-  defer sc.destroy_compile_result(&result)
+  compiled := sc.compile(&chart, sc.define(Door_State.Closed, states[:], transitions[:]))
+  defer sc.destroy_compile_result(&compiled)
   defer sc.destroy_chart(&chart)
-  assert(result.ok)
+  assert(compiled.ok)
 
   machine: sc.Instance(Door_State, Door_Event)
-  ok := sc.init(&machine, &chart)
+  assert(sc.init(&machine, &chart))
   defer sc.destroy_instance(&machine)
-  assert(ok)
 
   entry := sc.enter_initial(&machine)
   sc.destroy_dispatch_result(&entry)
 
-  dispatch := sc.dispatch(&machine, sc.event(Door_Event.Open))
-  sc.destroy_dispatch_result(&dispatch)
+  result := sc.dispatch(&machine, sc.event(Door_Event.Open))
+  sc.destroy_dispatch_result(&result)
   assert(sc.is_active(&machine, Door_State.Open))
 }
 ```
 
-## Commands
+For larger charts, keep the same table style and add the pieces you need:
+`substates`, `regions`, `histories`, `always_transitions`, `done_events`, and
+`after_events`. Use `sc.define_full` when the chart needs those advanced tables.
 
-Run tests:
+## Kvist Authoring
+
+The repo also includes `kvist-statecharts`, a Kvist layer over the same
+Odin runtime:
+
+```clojure
+(import chart "..")
+
+(chart.defchart door
+  :state Door-State
+  :event Door-Event
+  :initial Closed
+  :states [Closed Open Locked]
+  :on [[Closed Open Open]
+       [Open Close Closed]
+       [Closed Lock Locked]
+       [Locked Unlock Closed]])
+```
+
+The macro emits ordinary typed Odin tables. Runtime behavior is still the Odin
+engine. See [kvist-statecharts/README.md](kvist-statecharts/README.md).
+
+## Features
+
+- Hierarchical `Or` states and orthogonal `And` regions
+- External, local, and internal transitions
+- Guards, transition actions, entry actions, and exit actions
+- Shallow and deep history
+- Run-to-completion event raising
+- Final states and typed done events
+- Delayed events with application-owned time
+- Snapshot/restore helpers for active states, history, and timers
+- DOT and SCXML export
+
+## Layout
+
+- `statecharts/` - Odin package
+- `showcases/` - runnable examples
+- `kvist-statecharts/` - Kvist authoring layer
+- `SPEC.md` - semantics and API details
+- `DRONE_EXAMPLE.md` - larger annotated example
+- `BENCHMARKS.md` - benchmark commands and results
+
+## Commands
 
 ```sh
 odin test ./statecharts
 odin test ./statecharts -vet-unused
-```
 
-Build the library:
-
-```sh
-odin build ./statecharts -build-mode:lib -out:/tmp/statecharts.a
-```
-
-Run a showcase:
-
-```sh
 odin run showcases/drone_operations -collection:local=.
-```
+for dir in showcases/*; do odin run "$dir" -collection:local=. || exit 1; done
 
-Run all showcases:
-
-```sh
-for dir in showcases/*; do name=${dir##*/}; odin run "showcases/$name" -collection:local=. || exit 1; done
-```
-
-Run the benchmark guard:
-
-```sh
 odin run benchmarks/dispatch_bench.odin -file -collection:local=. -o:speed
 ```
