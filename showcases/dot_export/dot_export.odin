@@ -25,18 +25,14 @@ states := [?]sc.State_Def(Door_State){
 }
 
 transitions := [?]sc.Transition_Def(Door_State, Door_Event){
-  {source = .Closed, target = .Open, trigger = .Open},
-  {source = .Open, target = .Closed, trigger = .Close},
-  {source = .Closed, target = .Locked, trigger = .Lock},
-  {source = .Locked, target = .Closed, trigger = .Unlock},
+  sc.on(Door_State.Closed, Door_Event.Open, Door_State.Open),
+  sc.on(Door_State.Open, Door_Event.Close, Door_State.Closed),
+  sc.on(Door_State.Closed, Door_Event.Lock, Door_State.Locked),
+  sc.on(Door_State.Locked, Door_Event.Unlock, Door_State.Closed),
 }
 
 main :: proc() {
-  chart_def := sc.Chart_Def(Door_State, Door_Event){
-    initial = .Closed,
-    states = states[:],
-    transitions = transitions[:],
-  }
+  chart_def := sc.define(Door_State.Closed, states[:], transitions[:])
 
   chart: sc.Chart(Door_State, Door_Event)
   compile_result := sc.compile(&chart, chart_def)

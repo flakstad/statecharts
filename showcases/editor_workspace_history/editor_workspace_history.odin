@@ -48,21 +48,25 @@ histories := [?]sc.History_Def(Editor_State){
 }
 
 transitions := [?]sc.Transition_Def(Editor_State, Editor_Event){
-  {source = .Select, target = .Draw, trigger = .Choose_Draw},
-  {source = .Clean, target = .Dirty, trigger = .Edit},
-  {source = .Workspace, target = .Suspended, trigger = .Focus_Lost},
-  {source = .Suspended, target = .Workspace_History, trigger = .Focus_Restored},
+  sc.on(Editor_State.Select, Editor_Event.Choose_Draw, Editor_State.Draw),
+  sc.on(Editor_State.Clean, Editor_Event.Edit, Editor_State.Dirty),
+  sc.on(Editor_State.Workspace, Editor_Event.Focus_Lost, Editor_State.Suspended),
+  sc.on(Editor_State.Suspended, Editor_Event.Focus_Restored, Editor_State.Workspace_History),
 }
 
 chart_def :: proc() -> sc.Chart_Def(Editor_State, Editor_Event) {
-  return sc.Chart_Def(Editor_State, Editor_Event){
-    initial = .Workspace,
-    states = states[:],
-    substates = substates[:],
-    regions = regions[:],
-    histories = histories[:],
-    transitions = transitions[:],
-  }
+  return sc.define_full(
+    Editor_State.Workspace,
+    states[:],
+    substates[:],
+    regions[:],
+    nil,
+    histories[:],
+    transitions[:],
+    nil,
+    nil,
+    nil,
+  )
 }
 
 print_region :: proc(machine: ^sc.Instance(Editor_State, Editor_Event), label: string, region: string) {
@@ -79,7 +83,7 @@ print_workspace :: proc(machine: ^sc.Instance(Editor_State, Editor_Event), label
 }
 
 dispatch :: proc(machine: ^sc.Instance(Editor_State, Editor_Event), event: Editor_Event) {
-  result := sc.dispatch(machine, sc.Event(Editor_Event){id = event})
+  result := sc.dispatch(machine, sc.event(event))
   defer sc.destroy_dispatch_result(&result)
   fmt.printf("event: %v status: %v\n", event, result.status)
 }

@@ -55,24 +55,28 @@ histories := [?]sc.History_Def(Player_State){
 }
 
 transitions := [?]sc.Transition_Def(Player_State, Player_Event){
-  {source = .Stopped, target = .Playing, trigger = .Play},
-  {source = .Track, target = .Podcast, trigger = .Next},
-  {source = .Podcast, target = .AdBreak, trigger = .AdStarted},
-  {source = .AdBreak, target = .Podcast, trigger = .AdFinished},
-  {source = .Playing, target = .Paused, trigger = .Pause},
-  {source = .Paused, target = .Playing_History, trigger = .Resume},
-  {source = .Player, target = .Stopped, trigger = .Stop},
+  sc.on(Player_State.Stopped, Player_Event.Play, Player_State.Playing),
+  sc.on(Player_State.Track, Player_Event.Next, Player_State.Podcast),
+  sc.on(Player_State.Podcast, Player_Event.AdStarted, Player_State.AdBreak),
+  sc.on(Player_State.AdBreak, Player_Event.AdFinished, Player_State.Podcast),
+  sc.on(Player_State.Playing, Player_Event.Pause, Player_State.Paused),
+  sc.on(Player_State.Paused, Player_Event.Resume, Player_State.Playing_History),
+  sc.on(Player_State.Player, Player_Event.Stop, Player_State.Stopped),
 }
 
 chart_def :: proc() -> sc.Chart_Def(Player_State, Player_Event) {
-  return sc.Chart_Def(Player_State, Player_Event){
-    initial = .Player,
-    states = states[:],
-    substates = substates[:],
-    regions = regions[:],
-    histories = histories[:],
-    transitions = transitions[:],
-  }
+  return sc.define_full(
+    Player_State.Player,
+    states[:],
+    substates[:],
+    regions[:],
+    nil,
+    histories[:],
+    transitions[:],
+    nil,
+    nil,
+    nil,
+  )
 }
 
 print_configuration :: proc(machine: ^sc.Instance(Player_State, Player_Event), label: string) {
@@ -88,7 +92,7 @@ print_configuration :: proc(machine: ^sc.Instance(Player_State, Player_Event), l
 }
 
 dispatch :: proc(machine: ^sc.Instance(Player_State, Player_Event), event: Player_Event) {
-  result := sc.dispatch(machine, sc.Event(Player_Event){id = event})
+  result := sc.dispatch(machine, sc.event(event))
   defer sc.destroy_dispatch_result(&result)
   fmt.printf("event: %v status: %v\n", event, result.status)
 }

@@ -145,6 +145,42 @@ rtc_raise_many_action :: proc(ctx: rawptr, event: rawptr) {
   }
 }
 
+@(test)
+test_define_helpers_build_basic_chart :: proc(t: ^testing.T) {
+  states := [?]State_Def(Test_State){
+    {id = .Off},
+    {id = .Booting, entry = boot_entry},
+  }
+  transitions := [?]Transition_Def(Test_State, Test_Event){
+    on(Test_State.Off, Test_Event.Power_On, Test_State.Booting),
+  }
+  chart_def := define(Test_State.Off, states[:], transitions[:])
+
+  chart: Chart(Test_State, Test_Event)
+  result := compile(&chart, chart_def)
+  defer destroy_compile_result(&result)
+  defer destroy_chart(&chart)
+  testing.expect(t, result.ok)
+
+  machine: Instance(Test_State, Test_Event)
+  ok := init(&machine, &chart)
+  defer destroy_instance(&machine)
+  testing.expect(t, ok)
+
+  ctx := Test_Ctx{log = make([dynamic]int)}
+  defer delete(ctx.log)
+
+  entry := enter_initial(&machine, &ctx)
+  destroy_dispatch_result(&entry)
+
+  dispatch_result := dispatch(&machine, event(Test_Event.Power_On), &ctx)
+  defer destroy_dispatch_result(&dispatch_result)
+
+  testing.expect(t, is_active(&machine, Test_State.Booting))
+  testing.expect_value(t, len(ctx.log), 1)
+  testing.expect_value(t, ctx.log[0], int(Log.Boot_Entry))
+}
+
 can_arm_guard :: proc(ctx_raw: rawptr, event_raw: rawptr) -> bool {
   ctx := context_as(ctx_raw, Test_Ctx)
   event := event_as(event_raw, Test_Event)

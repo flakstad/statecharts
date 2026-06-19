@@ -27,18 +27,14 @@ states := [?]sc.State_Def(Flow_State){
 }
 
 transitions := [?]sc.Transition_Def(Flow_State, Flow_Event){
-  {source = .Draft, target = .Reviewing, trigger = .Submit},
-  {source = .Reviewing, target = .Approved, trigger = .Approve},
-  {source = .Reviewing, target = .Rejected, trigger = .Reject},
-  {source = .Reviewing, target = .Draft, trigger = .Revise},
+  sc.on(Flow_State.Draft, Flow_Event.Submit, Flow_State.Reviewing),
+  sc.on(Flow_State.Reviewing, Flow_Event.Approve, Flow_State.Approved),
+  sc.on(Flow_State.Reviewing, Flow_Event.Reject, Flow_State.Rejected),
+  sc.on(Flow_State.Reviewing, Flow_Event.Revise, Flow_State.Draft),
 }
 
 main :: proc() {
-  chart_def := sc.Chart_Def(Flow_State, Flow_Event){
-    initial = .Draft,
-    states = states[:],
-    transitions = transitions[:],
-  }
+  chart_def := sc.define(Flow_State.Draft, states[:], transitions[:])
 
   chart: sc.Chart(Flow_State, Flow_Event)
   compile_result := sc.compile(&chart, chart_def)

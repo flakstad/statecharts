@@ -92,27 +92,32 @@ regions := [?]sc.Region_Def(Character_State){
 }
 
 transitions := [?]sc.Transition_Def(Character_State, Character_Event){
-  {source = .Idle, target = .Running, trigger = .Move},
-  {source = .Running, target = .Idle, trigger = .Stop},
-  {source = .Grounded, target = .Airborne, trigger = .Jump},
-  {source = .Airborne, target = .Grounded, trigger = .Land},
+  sc.on(Character_State.Idle, Character_Event.Move, Character_State.Running),
+  sc.on(Character_State.Running, Character_Event.Stop, Character_State.Idle),
+  sc.on(Character_State.Grounded, Character_Event.Jump, Character_State.Airborne),
+  sc.on(Character_State.Airborne, Character_Event.Land, Character_State.Grounded),
 
-  {source = .Ready, target = .Attacking, trigger = .Attack},
-  {source = .Attacking, target = .Recovering, trigger = .Hit},
-  {source = .Recovering, target = .Ready, trigger = .Recover},
+  sc.on(Character_State.Ready, Character_Event.Attack, Character_State.Attacking),
+  sc.on(Character_State.Attacking, Character_Event.Hit, Character_State.Recovering),
+  sc.on(Character_State.Recovering, Character_Event.Recover, Character_State.Ready),
 
-  {source = .Normal, target = .Stunned, trigger = .Hit},
-  {source = .Stunned, target = .Normal, trigger = .Recover},
+  sc.on(Character_State.Normal, Character_Event.Hit, Character_State.Stunned),
+  sc.on(Character_State.Stunned, Character_Event.Recover, Character_State.Normal),
 }
 
 chart_def :: proc() -> sc.Chart_Def(Character_State, Character_Event) {
-  return sc.Chart_Def(Character_State, Character_Event){
-    initial = .Character,
-    states = states[:],
-    substates = substates[:],
-    regions = regions[:],
-    transitions = transitions[:],
-  }
+  return sc.define_full(
+    Character_State.Character,
+    states[:],
+    substates[:],
+    regions[:],
+    nil,
+    nil,
+    transitions[:],
+    nil,
+    nil,
+    nil,
+  )
 }
 
 print_region_leaf :: proc(
@@ -145,7 +150,7 @@ dispatch :: proc(
   event: Character_Event,
   trace: ^[dynamic]sc.Transition_Step(Character_State),
 ) {
-  result := sc.dispatch_with_trace(machine, sc.Event(Character_Event){id = event}, trace)
+  result := sc.dispatch_with_trace(machine, sc.event(event), trace)
   defer sc.destroy_dispatch_result(&result)
 
   fmt.printf("event: %v status: %v transitions: %d\n", event, result.status, len(trace^))

@@ -26,23 +26,29 @@ states := [?]sc.State_Def(Session_State){
 }
 
 transitions := [?]sc.Transition_Def(Session_State, Session_Event){
-  {source = .Disconnected, target = .Connecting, trigger = .Connect},
-  {source = .Connecting, target = .Connected, trigger = .Connected},
-  {source = .Connecting, target = .Failed, trigger = .Timeout},
-  {source = .Connecting, target = .Failed, trigger = .GiveUp},
+  sc.on(Session_State.Disconnected, Session_Event.Connect, Session_State.Connecting),
+  sc.on(Session_State.Connecting, Session_Event.Connected, Session_State.Connected),
+  sc.on(Session_State.Connecting, Session_Event.Timeout, Session_State.Failed),
+  sc.on(Session_State.Connecting, Session_Event.GiveUp, Session_State.Failed),
 }
 
 after_events := [?]sc.After_Def(Session_State, Session_Event){
-  {state = .Connecting, delay_ms = 2_000, trigger = .Timeout},
+  sc.after(Session_State.Connecting, 2_000, Session_Event.Timeout),
 }
 
 chart_def :: proc() -> sc.Chart_Def(Session_State, Session_Event) {
-  return sc.Chart_Def(Session_State, Session_Event){
-    initial = .Disconnected,
-    states = states[:],
-    transitions = transitions[:],
-    after_events = after_events[:],
-  }
+  return sc.define_full(
+    Session_State.Disconnected,
+    states[:],
+    nil,
+    nil,
+    nil,
+    nil,
+    transitions[:],
+    nil,
+    nil,
+    after_events[:],
+  )
 }
 
 print_configuration :: proc(machine: ^sc.Instance(Session_State, Session_Event), label: string) {
@@ -73,7 +79,7 @@ main :: proc() {
   sc.destroy_dispatch_result(&result)
   print_configuration(&machine, "initial")
 
-  result = sc.dispatch_at(&machine, sc.Event(Session_Event){id = .Connect}, 10_100)
+  result = sc.dispatch_at(&machine, sc.event(Session_Event.Connect), 10_100)
   sc.destroy_dispatch_result(&result)
   print_configuration(&machine, "after connect")
   if due_ms, ok := sc.next_due_event_ms(&machine); ok {

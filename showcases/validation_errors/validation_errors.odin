@@ -22,16 +22,12 @@ states := [?]sc.State_Def(Demo_State){
 }
 
 transitions := [?]sc.Transition_Def(Demo_State, Demo_Event){
-  {source = .Idle, target = .Busy, trigger = .Start},
-  {source = .Idle, target = .Failed, trigger = .Start},
+  sc.on(Demo_State.Idle, Demo_Event.Start, Demo_State.Busy),
+  sc.on(Demo_State.Idle, Demo_Event.Start, Demo_State.Failed),
 }
 
 main :: proc() {
-  chart_def := sc.Chart_Def(Demo_State, Demo_Event){
-    initial = .Idle,
-    states = states[:],
-    transitions = transitions[:],
-  }
+  chart_def := sc.define(Demo_State.Idle, states[:], transitions[:])
 
   chart: sc.Chart(Demo_State, Demo_Event)
   result := sc.compile(&chart, chart_def)

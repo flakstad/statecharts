@@ -73,35 +73,25 @@ Drone_Event :: enum {
 }
 ```
 
-Transitions should be plain typed literals:
+Transitions should use `sc.on` in hand-written charts:
 
 ```odin
 transitions := [?]sc.Transition_Def(Drone_State, Drone_Event){
-	{source = .Off, target = .Booting, trigger = .Power_On},
-	{source = .Booting, target = .Operational, trigger = .Boot_Complete},
-
-	{
-		source = .Operational_Idle,
-		target = .Armed,
-		trigger = .Arm,
-		guard = can_arm,
-	},
-
-	{source = .Armed, target = .Operational_Idle, trigger = .Disarm},
-	{source = .Armed_Ready, target = .Armed_Taking_Off, trigger = .Takeoff},
-	{source = .Armed_Taking_Off, target = .Flying, trigger = .Takeoff_Complete},
-
-	{source = .Flying_Hover, target = .Flying_Mission, trigger = .Start_Mission},
-	{source = .Flying_Mission, target = .Flying_Hover, trigger = .Pause_Mission},
-	{source = .Flying_Hover, target = .Flying_Mission, trigger = .Resume_Mission},
-
-	{source = .Flying, target = .Flying_Returning_Home, trigger = .Return_Home, guard = can_return_home},
-	{source = .Flying, target = .Flying_Landing, trigger = .Land},
-	{source = .Flying_Landing, target = .Operational_Idle, trigger = .Landed},
-
-	{source = .Operational, target = .Faulted, trigger = .Fault_Detected},
-	{source = .Flying, target = .Flying_Returning_Home, trigger = .Signal_Lost, guard = can_return_home},
-	{source = .Faulted, target = .Booting, trigger = .Reset},
+	sc.on(Drone_State.Off, Drone_Event.Power_On, Drone_State.Booting),
+	sc.on(Drone_State.Booting, Drone_Event.Boot_Complete, Drone_State.Operational),
+	sc.on(Drone_State.Operational_Idle, Drone_Event.Arm, Drone_State.Armed, guard = can_arm),
+	sc.on(Drone_State.Armed, Drone_Event.Disarm, Drone_State.Operational_Idle),
+	sc.on(Drone_State.Armed_Ready, Drone_Event.Takeoff, Drone_State.Armed_Taking_Off),
+	sc.on(Drone_State.Armed_Taking_Off, Drone_Event.Takeoff_Complete, Drone_State.Flying),
+	sc.on(Drone_State.Flying_Hover, Drone_Event.Start_Mission, Drone_State.Flying_Mission),
+	sc.on(Drone_State.Flying_Mission, Drone_Event.Pause_Mission, Drone_State.Flying_Hover),
+	sc.on(Drone_State.Flying_Hover, Drone_Event.Resume_Mission, Drone_State.Flying_Mission),
+	sc.on(Drone_State.Flying, Drone_Event.Return_Home, Drone_State.Flying_Returning_Home, guard = can_return_home),
+	sc.on(Drone_State.Flying, Drone_Event.Land, Drone_State.Flying_Landing),
+	sc.on(Drone_State.Flying_Landing, Drone_Event.Landed, Drone_State.Operational_Idle),
+	sc.on(Drone_State.Operational, Drone_Event.Fault_Detected, Drone_State.Faulted),
+	sc.on(Drone_State.Flying, Drone_Event.Signal_Lost, Drone_State.Flying_Returning_Home, guard = can_return_home),
+	sc.on(Drone_State.Faulted, Drone_Event.Reset, Drone_State.Booting),
 }
 ```
 
@@ -287,13 +277,18 @@ Delayed events are defined with `After_Def`. Entering `state` arms the timer at 
 The chart has an initial top-level state. States with no superstate are top-level states.
 
 ```odin
-chart_def := sc.Chart_Def(Drone_State, Drone_Event){
-	initial = .Off,
-	states = states[:],
-	substates = substates[:],
-	regions = regions[:],
-	transitions = transitions[:],
-}
+chart_def := sc.define_full(
+	Drone_State.Off,
+	states[:],
+	substates[:],
+	regions[:],
+	nil,
+	nil,
+	transitions[:],
+	nil,
+	nil,
+	nil,
+)
 ```
 
 Proposed type:
@@ -714,7 +709,7 @@ ctx := Drone_Ctx{
 sc.enter_initial(&machine, &ctx)
 assert(sc.is_active(&machine, .Off))
 
-sc.dispatch(&machine, sc.Event(Drone_Event){id = .Power_On}, &ctx)
+sc.dispatch(&machine, sc.event(Drone_Event.Power_On), &ctx)
 assert(sc.is_active(&machine, .Booting))
 ```
 
@@ -872,10 +867,10 @@ regions := [?]sc.Region_Def(Drone_State){
 }
 ```
 
-Use plain struct literals for transitions:
+Use `sc.on` for transition tables:
 
 ```odin
-{source = .Off, target = .Booting, trigger = .Power_On}
+sc.on(Drone_State.Off, Drone_Event.Power_On, Drone_State.Booting)
 ```
 
 Do not require a fake `Root` or `Top` state in the user's enum. The chart's top is implicit, and `chart_def.initial` selects the initial top-level state.

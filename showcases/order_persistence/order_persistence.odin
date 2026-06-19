@@ -33,20 +33,16 @@ states := [?]sc.State_Def(Order_State){
 }
 
 transitions := [?]sc.Transition_Def(Order_State, Order_Event){
-  {source = .Draft, target = .Submitted, trigger = .Submit},
-  {source = .Submitted, target = .Paid, trigger = .Payment_Captured},
-  {source = .Paid, target = .Fulfilled, trigger = .Fulfill},
-  {source = .Draft, target = .Cancelled, trigger = .Cancel},
-  {source = .Submitted, target = .Cancelled, trigger = .Cancel},
-  {source = .Paid, target = .Cancelled, trigger = .Cancel},
+  sc.on(Order_State.Draft, Order_Event.Submit, Order_State.Submitted),
+  sc.on(Order_State.Submitted, Order_Event.Payment_Captured, Order_State.Paid),
+  sc.on(Order_State.Paid, Order_Event.Fulfill, Order_State.Fulfilled),
+  sc.on(Order_State.Draft, Order_Event.Cancel, Order_State.Cancelled),
+  sc.on(Order_State.Submitted, Order_Event.Cancel, Order_State.Cancelled),
+  sc.on(Order_State.Paid, Order_Event.Cancel, Order_State.Cancelled),
 }
 
 chart_def :: proc() -> sc.Chart_Def(Order_State, Order_Event) {
-  return sc.Chart_Def(Order_State, Order_Event){
-    initial = .Draft,
-    states = states[:],
-    transitions = transitions[:],
-  }
+  return sc.define(Order_State.Draft, states[:], transitions[:])
 }
 
 persist_leaves :: proc(row: ^Order_Row, machine: ^sc.Instance(Order_State, Order_Event)) {
@@ -72,7 +68,7 @@ handle_command :: proc(
     assert(ok)
   }
 
-  result := sc.dispatch(&machine, sc.Event(Order_Event){id = event})
+  result := sc.dispatch(&machine, sc.event(event))
   defer sc.destroy_dispatch_result(&result)
   if result.status == .Transitioned {
     persist_leaves(row, &machine)

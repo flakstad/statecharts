@@ -33,23 +33,27 @@ regions := [?]sc.Region_Def(Checkout_State){
 }
 
 transitions := [?]sc.Transition_Def(Checkout_State, Checkout_Event){
-  {source = .EnteringPayment, target = .PaymentCaptured, trigger = .SubmitPayment},
-  {source = .Checkout, target = .OrderClosed, trigger = .CheckoutDone},
+  sc.on(Checkout_State.EnteringPayment, Checkout_Event.SubmitPayment, Checkout_State.PaymentCaptured),
+  sc.on(Checkout_State.Checkout, Checkout_Event.CheckoutDone, Checkout_State.OrderClosed),
 }
 
 done_events := [?]sc.Done_Def(Checkout_State, Checkout_Event){
-  {state = .Checkout, trigger = .CheckoutDone},
+  sc.done(Checkout_State.Checkout, Checkout_Event.CheckoutDone),
 }
 
 chart_def :: proc() -> sc.Chart_Def(Checkout_State, Checkout_Event) {
-  return sc.Chart_Def(Checkout_State, Checkout_Event){
-    initial = .Checkout,
-    states = states[:],
-    substates = substates[:],
-    regions = regions[:],
-    transitions = transitions[:],
-    done_events = done_events[:],
-  }
+  return sc.define_full(
+    Checkout_State.Checkout,
+    states[:],
+    substates[:],
+    regions[:],
+    nil,
+    nil,
+    transitions[:],
+    nil,
+    done_events[:],
+    nil,
+  )
 }
 
 print_configuration :: proc(machine: ^sc.Instance(Checkout_State, Checkout_Event), label: string) {
@@ -80,7 +84,7 @@ main :: proc() {
   sc.destroy_dispatch_result(&result)
   print_configuration(&machine, "initial")
 
-  result = sc.dispatch_run_to_completion(&machine, sc.Event(Checkout_Event){id = .SubmitPayment})
+  result = sc.dispatch_run_to_completion(&machine, sc.event(Checkout_Event.SubmitPayment))
   defer sc.destroy_dispatch_result(&result)
 
   fmt.printf("submit status: %v\n", result.status)

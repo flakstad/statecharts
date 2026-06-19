@@ -18,6 +18,21 @@ The package uses application-defined enum types for states and events, validates
 - Active-state, history, and timer snapshot/restore helpers
 - DOT and SCXML export
 
+## Authoring API
+
+The `*_Def` structs are still the engine data model. For hand-written charts,
+the package also provides small constructors:
+
+```odin
+sc.on(Door_State.Closed, Door_Event.Open, Door_State.Open)
+sc.internal(Door_State.Open, Door_Event.Close, close_action)
+sc.after(Door_State.Open, 500, Door_Event.Close)
+sc.define(Door_State.Closed, states[:], transitions[:])
+```
+
+Use `define_full` when a chart needs substates, regions, history, always
+transitions, done events, or delayed events.
+
 ## Layout
 
 - `statecharts/`: library package
@@ -49,17 +64,14 @@ states := [?]sc.State_Def(Door_State){
 }
 
 transitions := [?]sc.Transition_Def(Door_State, Door_Event){
-  {source = .Closed, target = .Open, trigger = .Open},
-  {source = .Open, target = .Closed, trigger = .Close},
+  sc.on(Door_State.Closed, Door_Event.Open, Door_State.Open),
+  sc.on(Door_State.Open, Door_Event.Close, Door_State.Closed),
 }
 
 main :: proc() {
   chart: sc.Chart(Door_State, Door_Event)
-  result := sc.compile(&chart, sc.Chart_Def(Door_State, Door_Event){
-    initial = .Closed,
-    states = states[:],
-    transitions = transitions[:],
-  })
+  chart_def := sc.define(Door_State.Closed, states[:], transitions[:])
+  result := sc.compile(&chart, chart_def)
   defer sc.destroy_compile_result(&result)
   defer sc.destroy_chart(&chart)
   assert(result.ok)
@@ -72,7 +84,7 @@ main :: proc() {
   entry := sc.enter_initial(&machine)
   sc.destroy_dispatch_result(&entry)
 
-  dispatch := sc.dispatch(&machine, sc.Event(Door_Event){id = .Open})
+  dispatch := sc.dispatch(&machine, sc.event(Door_Event.Open))
   sc.destroy_dispatch_result(&dispatch)
   assert(sc.is_active(&machine, Door_State.Open))
 }

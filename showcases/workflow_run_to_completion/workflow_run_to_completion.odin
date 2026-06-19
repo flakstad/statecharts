@@ -30,7 +30,7 @@ log :: proc(ctx_raw: rawptr, message: string) {
 
 authorize :: proc(ctx: rawptr, event: rawptr) {
   log(ctx, "authorized")
-  ok := sc.raise(ctx, sc.Event(Workflow_Event){id = .Authorized})
+  ok := sc.raise(ctx, sc.event(Workflow_Event.Authorized))
   assert(ok)
 }
 
@@ -47,22 +47,28 @@ states := [?]sc.State_Def(Workflow_State){
 }
 
 transitions := [?]sc.Transition_Def(Workflow_State, Workflow_Event){
-  {source = .Draft, target = .Authorizing, trigger = .Submit, action = authorize},
-  {source = .Authorizing, target = .Capturing, trigger = .Authorized, action = capture},
-  {source = .Authorizing, target = .Failed, trigger = .Declined},
+  sc.on(Workflow_State.Draft, Workflow_Event.Submit, Workflow_State.Authorizing, action = authorize),
+  sc.on(Workflow_State.Authorizing, Workflow_Event.Authorized, Workflow_State.Capturing, action = capture),
+  sc.on(Workflow_State.Authorizing, Workflow_Event.Declined, Workflow_State.Failed),
 }
 
 always_transitions := [?]sc.Always_Def(Workflow_State){
-  {source = .Capturing, target = .Complete},
+  sc.always(Workflow_State.Capturing, Workflow_State.Complete),
 }
 
 chart_def :: proc() -> sc.Chart_Def(Workflow_State, Workflow_Event) {
-  return sc.Chart_Def(Workflow_State, Workflow_Event){
-    initial = .Draft,
-    states = states[:],
-    transitions = transitions[:],
-    always_transitions = always_transitions[:],
-  }
+  return sc.define_full(
+    Workflow_State.Draft,
+    states[:],
+    nil,
+    nil,
+    nil,
+    nil,
+    transitions[:],
+    always_transitions[:],
+    nil,
+    nil,
+  )
 }
 
 print_configuration :: proc(machine: ^sc.Instance(Workflow_State, Workflow_Event), label: string) {
@@ -98,7 +104,7 @@ main :: proc() {
 
   trace := make([dynamic]sc.Transition_Step(Workflow_State), 0, 3)
   defer delete(trace)
-  result = sc.dispatch_run_to_completion_with_trace(&machine, sc.Event(Workflow_Event){id = .Submit}, &trace, &ctx)
+  result = sc.dispatch_run_to_completion_with_trace(&machine, sc.event(Workflow_Event.Submit), &trace, &ctx)
   defer sc.destroy_dispatch_result(&result)
 
   fmt.printf("submit status: %v\n", result.status)
