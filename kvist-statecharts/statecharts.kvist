@@ -1,0 +1,200 @@
+(package statecharts)
+(import sc "../statecharts")
+
+(defmacro- enum-case [enum-type name]
+  (symbol (str (name enum-type) "." (name name))))
+
+(defmacro- state-entry [state-type entry]
+  (if (vector? entry)
+    (let [n (kvist.count entry)]
+      (if (= n 3)
+        (if (= (kvist.nth entry 1) :kind)
+          (quasiquote
+            (sc.State_Def (unquote state-type)
+              {id: (unquote (enum-case state-type (kvist.first entry)))
+               kind: (unquote (kvist.nth entry 2))}))
+          (error "state options currently support :kind"))
+        (error "state option rows are [State :kind Kind]")))
+    (quasiquote
+      (sc.State_Def (unquote state-type)
+        {id: (unquote (enum-case state-type entry))}))))
+
+(defmacro- transition-entry [state-type event-type row]
+  (let [n (kvist.count row)]
+    (if (= n 3)
+      (quasiquote
+        (sc.Transition_Def (unquote state-type) (unquote event-type)
+         {source: (unquote (enum-case state-type (kvist.nth row 0)))
+          trigger: (unquote (enum-case event-type (kvist.nth row 1)))
+          target: (unquote (enum-case state-type (kvist.nth row 2)))}))
+      (if (= n 5)
+        (if (= (kvist.nth row 3) :guard)
+          (quasiquote
+            (sc.Transition_Def (unquote state-type) (unquote event-type)
+             {source: (unquote (enum-case state-type (kvist.nth row 0)))
+              trigger: (unquote (enum-case event-type (kvist.nth row 1)))
+              target: (unquote (enum-case state-type (kvist.nth row 2)))
+              guard: (unquote (kvist.nth row 4))}))
+          (if (= (kvist.nth row 3) :action)
+            (quasiquote
+              (sc.Transition_Def (unquote state-type) (unquote event-type)
+               {source: (unquote (enum-case state-type (kvist.nth row 0)))
+                trigger: (unquote (enum-case event-type (kvist.nth row 1)))
+                target: (unquote (enum-case state-type (kvist.nth row 2)))
+                action: (unquote (kvist.nth row 4))}))
+            (error "transition options support :guard and :action")))
+        (if (= n 7)
+          (if (= (kvist.nth row 3) :guard)
+            (if (= (kvist.nth row 5) :action)
+              (quasiquote
+                (sc.Transition_Def (unquote state-type) (unquote event-type)
+                 {source: (unquote (enum-case state-type (kvist.nth row 0)))
+                  trigger: (unquote (enum-case event-type (kvist.nth row 1)))
+                  target: (unquote (enum-case state-type (kvist.nth row 2)))
+                  guard: (unquote (kvist.nth row 4))
+                  action: (unquote (kvist.nth row 6))}))
+              (error "transition option rows use :guard guard :action action"))
+            (error "transition option rows use :guard guard :action action"))
+          (error "transition rows are [source event target] with optional :guard/:action"))))))
+
+(defmacro- emit-states [state-type states]
+  (if (= (kvist.count states) 0)
+    (forms)
+    (concat
+      (forms (state-entry state-type (kvist.first states)))
+      (emit-states state-type (kvist.rest states)))))
+
+(defmacro- emit-transitions [state-type event-type rows]
+  (if (= (kvist.count rows) 0)
+    (forms)
+    (concat
+      (forms (transition-entry state-type event-type (kvist.first rows)))
+      (emit-transitions state-type event-type (kvist.rest rows)))))
+
+(defmacro defchart
+  "Define a small typed statechart table.
+
+  Shape:
+
+  `(defchart door
+     :state Door-State
+     :event Door-Event
+     :initial Closed
+     :states [Closed Open]
+     :on [[Closed Open Open]])`
+
+  This emits fixed global tables plus `door-chart` and `door-machine` type
+  aliases. Use `(compile! door chart)` to compile it."
+  [chart-name & body]
+  (if (= (kvist.count body) 10)
+    (if (= (kvist.nth body 0) :state)
+      (if (= (kvist.nth body 2) :event)
+        (if (= (kvist.nth body 4) :initial)
+          (if (= (kvist.nth body 6) :states)
+            (if (= (kvist.nth body 8) :on)
+              (let [state-type (kvist.nth body 1)
+                    event-type (kvist.nth body 3)
+                    initial (kvist.nth body 5)
+                    states (kvist.nth body 7)
+                    transitions (kvist.nth body 9)
+                prefix (name chart-name)
+                chart-type-name (symbol (str prefix "-chart"))
+                machine-type-name (symbol (str prefix "-machine"))
+                initial-name (symbol (str prefix "-initial"))
+                states-name (symbol (str prefix "-states"))
+                states-def-name (symbol (str prefix "-states:"))
+                transitions-name (symbol (str prefix "-transitions"))
+                transitions-def-name (symbol (str prefix "-transitions:"))
+                state-count (kvist.count states)
+                transition-count (kvist.count transitions)]
+            (forms
+              (quasiquote
+                (def (unquote chart-type-name)
+                  (type sc.Chart (unquote state-type) (unquote event-type))))
+              (quasiquote
+                (def (unquote machine-type-name)
+                  (type sc.Instance (unquote state-type) (unquote event-type))))
+              (quasiquote
+                (def (unquote initial-name) (unquote (enum-case state-type initial))))
+              (quasiquote
+                (defvar (unquote states-def-name) [(unquote state-count)](type sc.State_Def (unquote state-type))
+                  [(splice (emit-states state-type states))]))
+              (quasiquote
+                (defvar (unquote transitions-def-name)
+                  [(unquote transition-count)](type sc.Transition_Def (unquote state-type) (unquote event-type))
+                  [(splice (emit-transitions state-type event-type transitions))]))))
+              (error "defchart expects :on after :states"))
+            (error "defchart expects :states after :initial"))
+          (error "defchart expects :initial after :event"))
+        (error "defchart expects :event after :state"))
+      (error "defchart clauses must start with :state"))
+    (error "defchart expects :state, :event, :initial, :states, and :on clauses")))
+
+(defmacro compile!
+  "Compile chart tables generated by `defchart` into `chart`."
+  [chart-name chart]
+  (let [prefix (name chart-name)
+        initial-name (symbol (str prefix "-initial"))
+        states-name (symbol (str prefix "-states"))
+        transitions-name (symbol (str prefix "-transitions"))]
+    (quasiquote
+      (sc.compile
+        (addr (unquote chart))
+        (sc.define
+          (unquote initial-name)
+          (unquote states-name)[:]
+          (unquote transitions-name)[:])))))
+
+(defmacro init!
+  "Initialize `machine` from `chart`."
+  [machine chart]
+  (quasiquote
+    (sc.init (addr (unquote machine)) (addr (unquote chart)))))
+
+(defmacro enter-initial!
+  "Enter the initial state of `machine`."
+  [machine & ctx]
+  (if (= (kvist.count ctx) 0)
+    (quasiquote
+      (sc.enter_initial (addr (unquote machine))))
+    (quasiquote
+      (sc.enter_initial (addr (unquote machine)) (addr (unquote (kvist.first ctx)))))))
+
+(defmacro dispatch!
+  "Dispatch `event` into `machine`."
+  [machine event & ctx]
+  (if (= (kvist.count ctx) 0)
+    (quasiquote
+      (sc.dispatch (addr (unquote machine)) (sc.event (unquote event))))
+    (quasiquote
+      (sc.dispatch (addr (unquote machine)) (sc.event (unquote event)) (addr (unquote (kvist.first ctx)))))))
+
+(defmacro active?
+  "Return true when `state` is active in `machine`."
+  [machine state]
+  (quasiquote
+    (sc.is_active (addr (unquote machine)) (unquote state))))
+
+(defmacro destroy-chart!
+  "Destroy compiled chart storage."
+  [chart]
+  (quasiquote
+    (sc.destroy_chart (addr (unquote chart)))))
+
+(defmacro destroy-machine!
+  "Destroy machine storage."
+  [machine]
+  (quasiquote
+    (sc.destroy_instance (addr (unquote machine)))))
+
+(defmacro destroy-compile-result!
+  "Destroy compile result storage."
+  [result]
+  (quasiquote
+    (sc.destroy_compile_result (addr (unquote result)))))
+
+(defmacro destroy-dispatch-result!
+  "Destroy dispatch result storage."
+  [result]
+  (quasiquote
+    (sc.destroy_dispatch_result (addr (unquote result)))))

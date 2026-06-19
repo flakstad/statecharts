@@ -1,0 +1,35 @@
+(package main)
+(import chart "..")
+
+(defenum Door-State [Closed Open Locked])
+(defenum Door-Event [Open Close Lock Unlock])
+
+(chart.defchart door
+  :state Door-State
+  :event Door-Event
+  :initial Closed
+  :states [Closed Open Locked]
+  :on [[Closed Open Open]
+       [Open Close Closed]
+       [Closed Lock Locked]
+       [Locked Unlock Closed]])
+
+(defn main []
+  (let [compiled: door-chart {}
+        machine: door-machine {}]
+    (let [compile-result (chart.compile! door compiled)]
+      (defer (chart.destroy-compile-result! compile-result))
+      (defer (chart.destroy-chart! compiled))
+      (if compile-result.ok
+        (do
+          (let [ok (chart.init! machine compiled)]
+            (if ok
+              (do
+                (defer (chart.destroy-machine! machine))
+                (let [entry (chart.enter-initial! machine)]
+                  (chart.destroy-dispatch-result! entry))
+                (let [opened (chart.dispatch! machine Door-Event.Open)]
+                  (defer (chart.destroy-dispatch-result! opened))
+                  (println (chart.active? machine Door-State.Open))))
+              (println false))))
+        (println false)))))
